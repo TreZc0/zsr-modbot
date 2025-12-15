@@ -87,7 +87,10 @@ async function registerSlashCommands(guild) {
       .addSubcommand(subcommand =>
         subcommand
           .setName('list')
-          .setDescription('List all banned file extensions'))
+          .setDescription('List all banned file extensions')),
+    new Discord.SlashCommandBuilder()
+      .setName('modbot-help')
+      .setDescription('Show available commands and usage')
   ];
 
   try {
@@ -115,7 +118,31 @@ bot.on('interactionCreate', async interaction => {
 
   const guildState = state[interaction.guildId];
 
-  if (interaction.commandName === 'monitor-channel') {
+  if (interaction.commandName === 'modbot-help') {
+    const helpEmbed = {
+      title: "ZSR ModBot Help",
+      description: "Here are the available commands for managing the bot:",
+      color: 0x0099ff,
+      fields: [
+        {
+          name: "1. Setup Moderation Logging",
+          value: "`/monitor-channel <channel>`\nSets the text channel where the bot will log moderation actions (bans, warnings, etc.).\n*Requires 'Manage Server' permission.*"
+        },
+        {
+          name: "2. Manage Banned Extensions",
+          value: "`/banned-extensions add <extension>` - Ban a file type (e.g., .exe)\n`/banned-extensions remove <extension>` - Unban a file type\n`/banned-extensions list` - View all banned extensions\n*Requires 'Manage Server' permission.*"
+        }
+      ],
+      footer: {
+        text: "ZSR ModBot"
+      }
+    };
+
+    await interaction.reply({
+      embeds: [helpEmbed],
+      flags: Discord.MessageFlags.Ephemeral
+    });
+  } else if (interaction.commandName === 'monitor-channel') {
     // Check if user has permission
     if (!interaction.member.permissions.has(Discord.PermissionFlagsBits.ManageGuild)) {
       await interaction.reply({

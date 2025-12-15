@@ -67,6 +67,14 @@ npm start
 
 ## Usage
 
+### Getting Help
+
+Use the `/modbot-help` command to see a list of available commands and their usage directly in Discord:
+
+```
+/modbot-help
+```
+
 ### Multi-Guild Support
 The bot now supports multiple guilds (servers) out of the box. Configuration for moderation channels and banned file extensions is stored per-guild in `state.json`.
 
