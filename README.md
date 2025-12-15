@@ -46,9 +46,7 @@ npm install
 
 3. Configure the bot:
    - Open `config.json`
-   - Replace `YOUR_SERVER_ID_HERE` with your Discord server ID
    - Replace `YOUR_BOT_TOKEN_HERE` with your bot token
-   - Optionally modify `discord-banned-file-ext` array
 
 4. Start the bot:
 ```bash
@@ -61,27 +59,20 @@ npm start
 
 ```json
 {
-  "discord-server-id": "YOUR_SERVER_ID_HERE",
-  "discord-token": "YOUR_BOT_TOKEN_HERE",
-  "discord-banned-file-ext": [
-    ".exe",
-    ".scr",
-    ".bat",
-    ".com",
-    ".jar"
-  ]
+  "discord-token": "YOUR_BOT_TOKEN_HERE"
 }
 ```
 
-- **discord-server-id**: Your Discord server's ID
 - **discord-token**: Your bot's authentication token
-- **discord-banned-file-ext**: Array of file extensions to auto-remove
 
 ## Usage
 
+### Multi-Guild Support
+The bot now supports multiple guilds (servers) out of the box. Configuration for moderation channels and banned file extensions is stored per-guild in `state.json`.
+
 ### Setting Up Moderation Logging
 
-Use the `/monitor-channel` slash command to set where moderation events are logged:
+Use the `/monitor-channel` slash command to set where moderation events are logged for the current server:
 
 ```
 /monitor-channel #moderation-logs
@@ -91,6 +82,17 @@ Use the `/monitor-channel` slash command to set where moderation events are logg
 - You need "Manage Server" permission to use this command
 - The channel must be a text channel
 
+### Managing Banned Extensions
+
+Use the `/banned-extensions` slash command to manage prohibited file types for the current server:
+
+- **Add an extension:** `/banned-extensions add .exe`
+- **Remove an extension:** `/banned-extensions remove .exe`
+- **List banned extensions:** `/banned-extensions list`
+
+**Requirements:**
+- You need "Manage Server" permission to use this command
+
 ### Automatic Moderation
 
 The bot automatically monitors all messages for spam patterns and takes action:
@@ -98,7 +100,7 @@ The bot automatically monitors all messages for spam patterns and takes action:
 1. **First offense** (for @everyone/@here): Warning message + deletion
 2. **Repeat offense**: Automatic ban + moderation log
 3. **Malware/phishing links**: Immediate ban + log
-4. **Banned file extensions**: Message deletion + DM warning to user + log
+4. **Banned file extensions**: Message deletion + DM warning to user + log (requires configuration via `/banned-extensions`)
 
 ## Moderation Actions
 

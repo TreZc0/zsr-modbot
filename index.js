@@ -10,14 +10,10 @@ const configFile = './config.json';
 const config = jsonfile.readFileSync(configFile);
 
 const discordToken = config["discord-token"];
-const activeGuild = config["discord-server-id"];
-const bannedFileExtensions = config["discord-banned-file-ext"] || [];
 
 // State management
 const stateFile = './state.json';
-let state = {
-  "moderationChannelId": ""
-};
+let state = {};
 
 if (!fs.existsSync(stateFile)) {
   jsonfile.writeFileSync(stateFile, state);
@@ -44,13 +40,22 @@ let memberFetching = false;
 const autoBan = true;
 
 // Bot ready event
-bot.on('ready', () => {
+bot.on('clientReady', () => {
   console.log('Logged in as %s - %s', bot.user.username, bot.user.id);
-  registerSlashCommands();
+
+  // Register commands for all guilds
+  bot.guilds.cache.forEach(guild => {
+    registerSlashCommands(guild);
+  });
 });
 
-// Register slash commands
-async function registerSlashCommands() {
+bot.on('guildCreate', guild => {
+  console.log(`Joined new guild: ${guild.name} (${guild.id})`);
+  registerSlashCommands(guild);
+});
+
+// Register slash commands per guild
+async function registerSlashCommands(guild) {
   const commands = [
     new Discord.SlashCommandBuilder()
       .setName('monitor-channel')
@@ -59,17 +64,39 @@ async function registerSlashCommands() {
         option.setName('channel')
           .setDescription('The channel to send moderation logs')
           .setRequired(true)
-      )
+      ),
+    new Discord.SlashCommandBuilder()
+      .setName('banned-extensions')
+      .setDescription('Manage detected file extensions')
+      .addSubcommand(subcommand =>
+        subcommand
+          .setName('add')
+          .setDescription('Add a file extension to the ban list')
+          .addStringOption(option =>
+            option.setName('extension')
+              .setDescription('The file extension to add (e.g., .exe)')
+              .setRequired(true)))
+      .addSubcommand(subcommand =>
+        subcommand
+          .setName('remove')
+          .setDescription('Remove a file extension from the ban list')
+          .addStringOption(option =>
+            option.setName('extension')
+              .setDescription('The file extension to remove')
+              .setRequired(true)))
+      .addSubcommand(subcommand =>
+        subcommand
+          .setName('list')
+          .setDescription('List all banned file extensions'))
   ];
 
   try {
-    const guild = bot.guilds.cache.get(activeGuild);
     if (guild) {
       await guild.commands.set(commands.map(cmd => cmd.toJSON()));
-      console.log('Slash commands registered successfully');
+      console.log(`Slash commands registered successfully for guild: ${guild.name}`);
     }
   } catch (error) {
-    console.error('Error registering slash commands:', error);
+    console.error(`Error registering slash commands for guild ${guild.id}:`, error);
   }
 }
 
@@ -77,12 +104,23 @@ async function registerSlashCommands() {
 bot.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return;
 
+  // Ensure guild state exists
+  if (!state[interaction.guildId]) {
+    state[interaction.guildId] = {
+      moderationChannelId: "",
+      bannedExtensions: []
+    };
+    commitState();
+  }
+
+  const guildState = state[interaction.guildId];
+
   if (interaction.commandName === 'monitor-channel') {
     // Check if user has permission
     if (!interaction.member.permissions.has(Discord.PermissionFlagsBits.ManageGuild)) {
       await interaction.reply({
         content: 'You need Manage Server permission to use this command.',
-        ephemeral: true
+        flags: Discord.MessageFlags.Ephemeral
       });
       return;
     }
@@ -92,18 +130,72 @@ bot.on('interactionCreate', async interaction => {
     if (channel.type !== Discord.ChannelType.GuildText) {
       await interaction.reply({
         content: 'Please select a text channel.',
-        ephemeral: true
+        flags: Discord.MessageFlags.Ephemeral
       });
       return;
     }
 
-    state.moderationChannelId = channel.id;
+    guildState.moderationChannelId = channel.id;
     commitState();
 
     await interaction.reply({
       content: `Moderation events will now be logged to ${channel}`,
-      ephemeral: true
+      flags: Discord.MessageFlags.Ephemeral
     });
+  } else if (interaction.commandName === 'banned-extensions') {
+    if (!interaction.member.permissions.has(Discord.PermissionFlagsBits.ManageGuild)) {
+      await interaction.reply({
+        content: 'You need Manage Server permission to use this command.',
+        flags: Discord.MessageFlags.Ephemeral
+      });
+      return;
+    }
+
+    const subcommand = interaction.options.getSubcommand();
+
+    if (subcommand === 'list') {
+      const extensions = guildState.bannedExtensions;
+      const listText = extensions.length > 0 ? extensions.join(', ') : 'None';
+      await interaction.reply({
+        content: `Currently banned extensions: ${listText}`,
+        flags: Discord.MessageFlags.Ephemeral
+      });
+    } else if (subcommand === 'add') {
+      let ext = interaction.options.getString('extension').toLowerCase();
+      if (!ext.startsWith('.')) ext = '.' + ext;
+
+      if (!guildState.bannedExtensions.includes(ext)) {
+        guildState.bannedExtensions.push(ext);
+        commitState();
+        await interaction.reply({
+          content: `Added ${ext} to banned extensions list.`,
+          flags: Discord.MessageFlags.Ephemeral
+        });
+      } else {
+        await interaction.reply({
+          content: `${ext} is already in the banned extensions list.`,
+          flags: Discord.MessageFlags.Ephemeral
+        });
+      }
+    } else if (subcommand === 'remove') {
+      let ext = interaction.options.getString('extension').toLowerCase();
+      if (!ext.startsWith('.')) ext = '.' + ext;
+
+      const index = guildState.bannedExtensions.indexOf(ext);
+      if (index > -1) {
+        guildState.bannedExtensions.splice(index, 1);
+        commitState();
+        await interaction.reply({
+          content: `Removed ${ext} from banned extensions list.`,
+          flags: Discord.MessageFlags.Ephemeral
+        });
+      } else {
+        await interaction.reply({
+          content: `${ext} is not in the banned extensions list.`,
+          flags: Discord.MessageFlags.Ephemeral
+        });
+      }
+    }
   }
 });
 
@@ -114,6 +206,18 @@ bot.on('messageCreate', message => {
     return;
   }
 
+  // Ensure guild state exists
+  if (!state[message.guild.id]) {
+    // Don't auto-create state here if we want to avoid clutter, 
+    // but for simplicity let's rely on commands creating it or create it on first moderation action need?
+    // Actually, needed for banned extensions check.
+    state[message.guild.id] = {
+      moderationChannelId: "",
+      bannedExtensions: []
+    };
+    commitState();
+  }
+
   // Handle broken member objects
   if (!message.member && message.content.startsWith("!")) {
     message.reply("Couldn't grab your server membership data via API. A reindex has been triggered. Please try again in a minute.");
@@ -121,7 +225,7 @@ bot.on('messageCreate', message => {
 
     if (!memberFetching) {
       memberFetching = true;
-      bot.guilds.cache.get(activeGuild).fetch()
+      message.guild.members.fetch()
         .then(() => {
           memberFetching = false;
           console.log("Refetched Server members");
@@ -150,7 +254,7 @@ bot.on('messageCreate', message => {
   if (isOnlyAttachmentsThreePlus) {
     const uid = message.author.id;
     if (uid in botSpamScreenShotCheckObj && botSpamScreenShotCheckObj[uid] !== message.channel.id) {
-      message.delete().catch(() => {});
+      message.delete().catch(() => { });
       message.member.ban({
         deleteMessageSeconds: 43200,
         reason: "Spam Bot with mass screenshots, auto banned!"
@@ -163,6 +267,7 @@ bot.on('messageCreate', message => {
       logModerationAction({
         user: message.author.username,
         channel: { name: message.channel.name, id: message.channel.id },
+        guildId: message.guild.id,
         offense: "Mass Screenshots spam",
         action: "Message Deleted & User Banned",
         messageObj: { id: message.id, content: message.content }
@@ -182,7 +287,7 @@ bot.on('messageCreate', message => {
 
   // Check for banned file extensions
   let forbiddenMessageDeleted = false;
-  if (bannedFileExtensions.length > 0 && message.attachments.size > 0) {
+  if (state[message.guild.id].bannedExtensions.length > 0 && message.attachments.size > 0) {
     forbiddenMessageDeleted = bannedAttachmentCheck(message);
   }
 
@@ -190,7 +295,7 @@ bot.on('messageCreate', message => {
 
   // Everyone/Here ping detection
   if (message.member && !message.member.permissions.has(Discord.PermissionFlagsBits.MentionEveryone) &&
-      (message.content.includes("@everyone") || message.content.includes("@here"))) {
+    (message.content.includes("@everyone") || message.content.includes("@here"))) {
 
     if (botSpamCheck.includes(message.member.displayName)) {
       message.delete();
@@ -206,6 +311,7 @@ bot.on('messageCreate', message => {
       logModerationAction({
         user: message.author.username,
         channel: { name: message.channel.name, id: message.channel.id },
+        guildId: message.guild.id,
         offense: "Repeated unauthorized Everyone/Here Ping",
         action: "Message Deleted & User Banned",
         messageObj: { id: message.id, content: message.content }
@@ -224,6 +330,7 @@ bot.on('messageCreate', message => {
       logModerationAction({
         user: message.author.username,
         channel: { name: message.channel.name, id: message.channel.id },
+        guildId: message.guild.id,
         offense: "Unauthorized Everyone/Here Ping",
         action: "Message Deleted & Warning issued",
         messageObj: { id: message.id, content: message.content }
@@ -250,6 +357,7 @@ bot.on('messageCreate', message => {
         logModerationAction({
           user: message.author.username,
           channel: { name: message.channel.name, id: message.channel.id },
+          guildId: message.guild.id,
           offense: "Mass Ping from user without roles",
           action: "Message Deleted & User Banned",
           messageObj: { id: message.id, content: message.content }
@@ -266,6 +374,7 @@ bot.on('messageCreate', message => {
         logModerationAction({
           user: message.author.username,
           channel: { name: message.channel.name, id: message.channel.id },
+          guildId: message.guild.id,
           offense: "Malware Link Spam from user without roles",
           action: "Message Deleted & User Banned",
           messageObj: { id: message.id, content: message.content }
@@ -281,6 +390,7 @@ bot.on('messageCreate', message => {
         logModerationAction({
           user: message.author.username,
           channel: { name: message.channel.name, id: message.channel.id },
+          guildId: message.guild.id,
           offense: "Malware Link Spam from user without roles",
           action: "Message Deleted & User Banned",
           messageObj: { id: message.id, content: message.content }
@@ -301,6 +411,7 @@ bot.on('messageCreate', message => {
         logModerationAction({
           user: message.author.username,
           channel: { name: message.channel.name, id: message.channel.id },
+          guildId: message.guild.id,
           offense: "Malware Link Spam from user without roles",
           action: "Message Deleted & User Banned",
           messageObj: { id: message.id, content: message.content }
@@ -320,6 +431,7 @@ bot.on('messageCreate', message => {
         logModerationAction({
           user: message.author.username,
           channel: { name: message.channel.name, id: message.channel.id },
+          guildId: message.guild.id,
           offense: "Malware Link Spam from user without roles",
           action: "Message Deleted & User Banned",
           messageObj: { id: message.id, content: message.content }
@@ -340,6 +452,7 @@ bot.on('messageCreate', message => {
         logModerationAction({
           user: message.author.username,
           channel: { name: message.channel.name, id: message.channel.id },
+          guildId: message.guild.id,
           offense: "Malware Link Spam from user without roles",
           action: "Message Deleted & User Banned",
           messageObj: { id: message.id, content: message.content }
@@ -360,6 +473,7 @@ bot.on('messageCreate', message => {
         logModerationAction({
           user: message.author.username,
           channel: { name: message.channel.name, id: message.channel.id },
+          guildId: message.guild.id,
           offense: "Malware Link Spam (Betting) from user without roles",
           action: "Message Deleted & User Banned",
           messageObj: { id: message.id, content: message.content }
@@ -375,8 +489,10 @@ function bannedAttachmentCheck(message) {
   const attachmentCollection = message.attachments;
   let bannedAttachmentTypeFound = false;
 
+  const guildExtensions = state[message.guild.id] ? state[message.guild.id].bannedExtensions : [];
+
   attachmentCollection.forEach(att => {
-    bannedFileExtensions.forEach(ext => {
+    guildExtensions.forEach(ext => {
       if (att.name.toLowerCase().endsWith(ext))
         bannedAttachmentTypeFound = true;
     });
@@ -389,6 +505,7 @@ function bannedAttachmentCheck(message) {
         name: message.channel.name,
         id: message.channel.id
       },
+      guildId: message.guild.id,
       offense: "Banned File Extension",
       action: "Message Deleted & User warned",
       messageObj: {
@@ -404,9 +521,9 @@ function bannedAttachmentCheck(message) {
       });
 
     let warningMsg = `Hey there, ${author.username}!\nYou just sent a message containing a forbidden file in our discord. The message has been deleted automatically.\
-\nPlease refrain from sending a file of the following types in the future: ${bannedFileExtensions.join(", ")}\
-\nOur 'welcome' channel contains our server rules - please make sure to read them again and follow them to ensure every community member can have a good time.\
-\n\nBest\n**Your moderation team**`;
+\nPlease refrain from sending a file of the following types in the future: ${guildExtensions.join(", ")}\
+\nPlease refer to our server rules - please make sure to read them again and follow them to ensure every community member can have a good time.\
+\n\n**Your moderation team**`;
 
     message.author.send(warningMsg)
       .catch(ex => {
@@ -421,12 +538,14 @@ function bannedAttachmentCheck(message) {
 
 // Log moderation actions
 function logModerationAction(actionObj) {
-  if (!state.moderationChannelId) {
-    console.log("No moderation channel set. Use /monitor-channel to set one.");
+  const guildId = actionObj.guildId;
+
+  if (!state[guildId] || !state[guildId].moderationChannelId) {
+    // console.log("No moderation channel set for guild " + guildId);
     return;
   }
 
-  const channel = bot.guilds.cache.get(activeGuild)?.channels.cache.get(state.moderationChannelId);
+  const channel = bot.guilds.cache.get(guildId)?.channels.cache.get(state[guildId].moderationChannelId);
   if (!channel) {
     console.log("Moderation channel not found.");
     return;
@@ -437,7 +556,7 @@ function logModerationAction(actionObj) {
   const embed = {
     title: "Bot Moderation Action: " + actionObj.action,
     description: "Reason: " + actionObj.offense,
-    url: `https://discord.com/channels/${activeGuild}/${actionObj.channel.id}/${actionObj.messageObj.id}`,
+    url: `https://discord.com/channels/${guildId}/${actionObj.channel.id}/${actionObj.messageObj.id}`,
     color: 0xFF0000,
     timestamp: postDate,
     footer: {
