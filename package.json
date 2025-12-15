@@ -1,0 +1,25 @@
+{
+  "name": "discord-moderation-bot",
+  "description": "Discord Bot for automated spam and malware detection with moderation logging",
+  "main": "index.js",
+  "version": "1.0.0",
+  "license": "MIT",
+  "keywords": [
+    "discord",
+    "bot",
+    "moderation",
+    "spam protection",
+    "anti-spam",
+    "security"
+  ],
+  "dependencies": {
+    "discord.js": "14.25.1",
+    "jsonfile": "^6.2.0"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node index.js"
+  }
+}
