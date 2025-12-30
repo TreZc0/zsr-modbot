@@ -277,8 +277,14 @@ bot.on('messageCreate', message => {
   remainder = remainder.replace(/\*\*/g, "").replace(/__/g, "").replace(/~~/g, "").replace(/\*/g, "").trim();
 
   const isOnlyAttachmentsThreePlus = matches.length >= 3 && remainder.length === 0;
+  
+  // Check for markdown link spam (e.g., [1.jpg](https://imgur.com/a/xyz))
+  const markdownLinkRe = /\[([^\]]+)\]\(([^)]+)\)/g;
+  const markdownMatches = message.content.match(markdownLinkRe) || [];
+  const markdownRemainder = message.content.replace(markdownLinkRe, "").trim();
+  const isOnlyMarkdownLinksFour = markdownMatches.length === 4 && markdownRemainder.length === 0;
 
-  if (isOnlyAttachmentsThreePlus) {
+  if (isOnlyAttachmentsThreePlus || isOnlyMarkdownLinksFour) {
     const uid = message.author.id;
     if (uid in botSpamScreenShotCheckObj && botSpamScreenShotCheckObj[uid] !== message.channel.id) {
       message.delete().catch(() => { });
