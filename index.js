@@ -304,7 +304,7 @@ bot.on('messageCreate', message => {
       setTimeout(() => {
         if (uid in botSpamScreenShotCheckObj)
           delete botSpamScreenShotCheckObj[uid];
-      }, 30000);
+      }, 180000);
     }
   }
 
