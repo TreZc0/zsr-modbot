@@ -277,14 +277,22 @@ bot.on('messageCreate', message => {
   remainder = remainder.replace(/\*\*/g, "").replace(/__/g, "").replace(/~~/g, "").replace(/\*/g, "").trim();
 
   const isOnlyAttachmentsThreePlus = matches.length >= 3 && remainder.length === 0;
-  
+
   // Check for markdown link spam (e.g., [1.jpg](https://imgur.com/a/xyz))
   const markdownLinkRe = /\[([^\]]+)\]\(([^)]+)\)/g;
   const markdownMatches = message.content.match(markdownLinkRe) || [];
   const markdownRemainder = message.content.replace(markdownLinkRe, "").trim();
   const isOnlyMarkdownLinksFour = markdownMatches.length === 4 && markdownRemainder.length === 0;
 
-  if (isOnlyAttachmentsThreePlus || isOnlyMarkdownLinksFour) {
+  // Check for actual file attachments (uploaded files, not URLs in content)
+  let fileAttachmentRemainder = message.content.trim();
+  // Remove Discord spoiler tags ||
+  fileAttachmentRemainder = fileAttachmentRemainder.replace(/\|\|/g, "").trim();
+  // Remove markdown formatting (bold **, italic *, underline __, strikethrough ~~)
+  fileAttachmentRemainder = fileAttachmentRemainder.replace(/\*\*/g, "").replace(/__/g, "").replace(/~~/g, "").replace(/\*/g, "").trim();
+  const isOnlyFileAttachmentsFourPlus = message.attachments.size ==4 && fileAttachmentRemainder.length <= 2;
+
+  if (isOnlyAttachmentsThreePlus || isOnlyMarkdownLinksFour || isOnlyFileAttachmentsFourPlus) {
     const uid = message.author.id;
     if (uid in botSpamScreenShotCheckObj && botSpamScreenShotCheckObj[uid] !== message.channel.id) {
       message.delete().catch(() => { });
