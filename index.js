@@ -163,10 +163,11 @@ bot.on('interactionCreate', async interaction => {
     }
 
     guildState.moderationChannelId = channel.id;
+    console.log(`New monitoring channel ${channel.id} set for guild ${interaction.guildId} by user: ${interaction.member.displayName}`);
     commitState();
 
     await interaction.reply({
-      content: `Moderation events will now be logged to ${channel}`,
+      content: `Moderation events will now be logged to ${channel}. Please make sure the bot has write access to that channel.`,
       flags: Discord.MessageFlags.Ephemeral
     });
   } else if (interaction.commandName === 'banned-extensions') {
@@ -582,7 +583,7 @@ function logModerationAction(actionObj) {
   const guildId = actionObj.guildId;
 
   if (!state[guildId] || !state[guildId].moderationChannelId) {
-    // console.log("No moderation channel set for guild " + guildId);
+    console.log("No moderation channel set for guild " + guildId + "- cannot log event!");
     return;
   }
 
