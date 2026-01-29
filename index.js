@@ -293,7 +293,13 @@ bot.on('messageCreate', message => {
   fileAttachmentRemainder = fileAttachmentRemainder.replace(/\*\*/g, "").replace(/__/g, "").replace(/~~/g, "").replace(/\*/g, "").trim();
   const isOnlyFileAttachmentsFourPlus = message.attachments.size ==4 && fileAttachmentRemainder.length <= 2;
 
-  if (isOnlyAttachmentsThreePlus || isOnlyMarkdownLinksFour || isOnlyFileAttachmentsFourPlus) {
+    // Check for plain image URL spam (3+ bare image URLs)
+  const plainImageUrlRe = /<?https?:\/\/[^\s>]+\.(?:jpg|jpeg|png|gif|webp|bmp)(?:\?[^\s>]*)?>?/gi;
+  const plainImageMatches = message.content.match(plainImageUrlRe) || [];
+  const plainImageRemainder = message.content.replace(plainImageUrlRe, "").trim();
+  const isOnlyPlainImageUrls = plainImageMatches.length >= 3 && plainImageRemainder.length === 0;
+  
+  if (isOnlyAttachmentsThreePlus || isOnlyMarkdownLinksFour || isOnlyFileAttachmentsFourPlus || isOnlyPlainImageUrls) {
     const uid = message.author.id;
     if (uid in botSpamScreenShotCheckObj && botSpamScreenShotCheckObj[uid] !== message.channel.id) {
       message.delete().catch(() => { });
