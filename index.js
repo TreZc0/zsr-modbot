@@ -34,7 +34,6 @@ const bot = new Discord.Client({ intents: botIntents });
 // Spam tracking
 let botSpamCheck = [];
 let botSpamScreenShotCheckObj = {};
-let memberFetching = false;
 
 // Constants
 const autoBan = true;
@@ -228,7 +227,7 @@ bot.on('interactionCreate', async interaction => {
 });
 
 // Message handling
-bot.on('messageCreate', message => {
+bot.on('messageCreate', async message => {
   // Ignore DMs and unknown channels
   if (!message.guild || (message.channel && (message.channel.type === Discord.ChannelType.DM))) {
     return;
@@ -246,26 +245,6 @@ bot.on('messageCreate', message => {
     commitState();
   }
 
-  // Handle broken member objects
-  if (!message.member && message.content.startsWith("!")) {
-    message.reply("Couldn't grab your server membership data via API. A reindex has been triggered. Please try again in a minute.");
-    console.log("Broken message object detected - User: " + message.author.username);
-
-    if (!memberFetching) {
-      memberFetching = true;
-      message.guild.members.fetch()
-        .then(() => {
-          memberFetching = false;
-          console.log("Refetched Server members");
-        })
-        .catch(e => {
-          console.error("Error during member fetching: " + e);
-          memberFetching = false;
-        });
-    }
-    return;
-  }
-
   // Mass screenshots spam detection
   const attachRe = /<?https:\/\/(?:cdn|media)\.discord(?:app)?\.(?:com|net)\/attachments\/\d+\/\d+\/[^\s>]+(?=>|\s|$)>?/g;
   const matches = message.content.match(attachRe) || [];
@@ -275,7 +254,7 @@ bot.on('messageCreate', message => {
   // Remove Discord spoiler tags ||
   remainder = remainder.replace(/\|\|/g, "").trim();
   // Remove markdown formatting (bold **, italic *, underline __, strikethrough ~~)
-  remainder = remainder.replace(/\*\*/g, "").replace(/__/g, "").replace(/~~/g, "").replace(/\*/g, "").trim();
+  remainder = remainder.replace(/\*\*/g, "").replace(/__/g, "").replace(/~~/g, "").replace(/\*/g, "").replace(/_ _/g, "").trim();
 
   const isOnlyAttachmentsThreePlus = matches.length >= 3 && remainder.length === 0;
 
@@ -290,43 +269,61 @@ bot.on('messageCreate', message => {
   // Remove Discord spoiler tags ||
   fileAttachmentRemainder = fileAttachmentRemainder.replace(/\|\|/g, "").trim();
   // Remove markdown formatting (bold **, italic *, underline __, strikethrough ~~)
-  fileAttachmentRemainder = fileAttachmentRemainder.replace(/\*\*/g, "").replace(/__/g, "").replace(/~~/g, "").replace(/\*/g, "").trim();
-  const isOnlyFileAttachmentsFourPlus = message.attachments.size ==4 && fileAttachmentRemainder.length <= 2;
+  fileAttachmentRemainder = fileAttachmentRemainder.replace(/\*\*/g, "").replace(/__/g, "").replace(/~~/g, "").replace(/\*/g, "").replace(/_ _/g, "").trim();
+  const isOnlyFileAttachmentsFourPlus = message.attachments.size >= 4 && fileAttachmentRemainder.length <= 2;
 
-    // Check for plain image URL spam (3+ bare image URLs)
-  const plainImageUrlRe = /<?https?:\/\/[^\s>]+\.(?:jpg|jpeg|png|gif|webp|bmp)(?:\?[^\s>]*)?>?/gi;
-  const plainImageMatches = message.content.match(plainImageUrlRe) || [];
-  const plainImageRemainder = message.content.replace(plainImageUrlRe, "").trim();
-  const isOnlyPlainImageUrls = plainImageMatches.length >= 3 && plainImageRemainder.length === 0;
-  
-  if (isOnlyAttachmentsThreePlus || isOnlyMarkdownLinksFour || isOnlyFileAttachmentsFourPlus || isOnlyPlainImageUrls) {
-    const uid = message.author.id;
-    if (uid in botSpamScreenShotCheckObj && botSpamScreenShotCheckObj[uid] !== message.channel.id) {
-      message.delete().catch(() => { });
-      message.member.ban({
-        deleteMessageSeconds: 43200,
-        reason: "Spam Bot with mass screenshots, auto banned!"
-      })
-        .then(() => console.log(`Spam Bot with mass screenshots banned! Username: ${message.author.username}`))
+  if (isOnlyAttachmentsThreePlus || isOnlyMarkdownLinksFour || isOnlyFileAttachmentsFourPlus) {
+      const uid = message.author.id;
+
+      // Initialize tracking object if not exists
+      if (!(uid in botSpamScreenShotCheckObj)) {
+          botSpamScreenShotCheckObj[uid] = { count: 0, channels: new Set() };
+          setTimeout(() => {
+              if (uid in botSpamScreenShotCheckObj)
+                  delete botSpamScreenShotCheckObj[uid];
+          }, 180000);
+      }
+
+      // Only count if this is a new channel
+      if (!botSpamScreenShotCheckObj[uid].channels.has(message.channel.id)) {
+          botSpamScreenShotCheckObj[uid].channels.add(message.channel.id);
+          botSpamScreenShotCheckObj[uid].count++;
+      }
+
+      // Ban if spam detected in 2+ different channels
+      if (botSpamScreenShotCheckObj[uid].count >= 2) {
+          message.delete().catch(() => {});
+
+          // Fetch member if not available
+          let member = message.member;
+          if (!member) {
+              try {
+                  member = await message.guild.members.fetch(message.author.id);
+              } catch (error) {
+                  console.log("Couldn't fetch member for screenshot spam ban: " + error);
+                  delete botSpamScreenShotCheckObj[uid];
+                  return;
+              }
+          }
+
+          member.ban({
+              deleteMessageSeconds: 43200,
+              reason: "Spam Bot with mass screenshots, auto banned!"
+          })
+          .then(() => console.log(`Spam Bot with mass screenshots banned! Username: ${message.author.username}`))
         .catch(error => console.log("Couldn't ban bot (mass screenshots) because of the following error: \n" + error));
 
-      delete botSpamScreenShotCheckObj[uid];
-
-      logModerationAction({
-        user: message.author.username,
-        channel: { name: message.channel.name, id: message.channel.id },
-        guildId: message.guild.id,
-        offense: "Mass Screenshots spam",
-        action: "Message Deleted & User Banned",
-        messageObj: { id: message.id, content: message.content }
-      });
-    } else {
-      botSpamScreenShotCheckObj[uid] = message.channel.id;
-      setTimeout(() => {
-        if (uid in botSpamScreenShotCheckObj)
           delete botSpamScreenShotCheckObj[uid];
-      }, 180000);
-    }
+
+          logModerationAction({
+              user: message.author.username,
+              channel: { name: message.channel.name, id: message.channel.id },
+              guildId: message.guild.id,
+              offense: "Mass Screenshots spam",
+              action: "Message Deleted & User Banned",
+              messageObj: { id: message.id, content: message.content }
+          });
+      }
   }
 
   // Early returns for non-members and bots
