@@ -306,7 +306,7 @@ bot.on('messageCreate', async message => {
               try {
                   member = await message.guild.members.fetch(message.author.id);
               } catch (error) {
-                  console.log("Couldn't fetch member for screenshot spam ban: " + error);
+                  console.log("Couldn't fetch member for screenshot spam ban in guild " + message.guild.name + ": " + error);
                   delete botSpamScreenShotCheckObj[uid];
                   return;
               }
@@ -317,7 +317,7 @@ bot.on('messageCreate', async message => {
               reason: "Spam Bot with mass screenshots, auto banned!"
           })
           .then(() => console.log(`Spam Bot with mass screenshots banned! Username: ${message.author.username}`))
-        .catch(error => console.log("Couldn't ban bot (mass screenshots) because of the following error: \n" + error));
+        .catch(error => console.log("Couldn't ban bot (mass screenshots) in guild " + message.guild.name + " because of the following error: \n" + error));
 
           delete botSpamScreenShotCheckObj[uid];
 
