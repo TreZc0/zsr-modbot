@@ -256,13 +256,13 @@ bot.on('messageCreate', async message => {
   // Remove markdown formatting (bold **, italic *, underline __, strikethrough ~~)
   remainder = remainder.replace(/\*\*/g, "").replace(/__/g, "").replace(/~~/g, "").replace(/\*/g, "").replace(/_ _/g, "").trim();
 
-  const isOnlyAttachmentsThreePlus = matches.length >= 3 && remainder.length === 0;
+  const isOnlyAttachmentsTwoPlus = matches.length >= 2 && remainder.length === 0;
 
   // Check for markdown link spam (e.g., [1.jpg](https://imgur.com/a/xyz))
   const markdownLinkRe = /\[([^\]]+)\]\(([^)]+)\)/g;
   const markdownMatches = message.content.match(markdownLinkRe) || [];
   const markdownRemainder = message.content.replace(markdownLinkRe, "").trim();
-  const isOnlyMarkdownLinksFour = markdownMatches.length === 4 && markdownRemainder.length === 0;
+  const isOnlyMarkdownLinksTwo = markdownMatches.length >= 2 && markdownRemainder.length === 0;
 
   // Check for actual file attachments (uploaded files, not URLs in content)
   let fileAttachmentRemainder = message.content.trim();
@@ -270,15 +270,15 @@ bot.on('messageCreate', async message => {
   fileAttachmentRemainder = fileAttachmentRemainder.replace(/\|\|/g, "").trim();
   // Remove markdown formatting (bold **, italic *, underline __, strikethrough ~~)
   fileAttachmentRemainder = fileAttachmentRemainder.replace(/\*\*/g, "").replace(/__/g, "").replace(/~~/g, "").replace(/\*/g, "").replace(/_ _/g, "").trim();
-  const isOnlyFileAttachmentsFourPlus = message.attachments.size >= 4 && fileAttachmentRemainder.length <= 2;
+  const isOnlyFileAttachmentsTwoPlus = message.attachments.size >= 2 && fileAttachmentRemainder.length <= 2;
 
-  // Check for plain image URL spam (3+ bare image URLs)
+  // Check for plain image URL spam (2+ bare image URLs)
   const plainImageUrlRe = /<?https?:\/\/[^\s>]+\.(?:jpg|jpeg|png|gif|webp|bmp)(?:\?[^\s>]*)?>?/gi;
   const plainImageMatches = message.content.match(plainImageUrlRe) || [];
   const plainImageRemainder = message.content.replace(plainImageUrlRe, "").trim();
   const isOnlyPlainImageUrls = plainImageMatches.length >= 3 && plainImageRemainder.length === 0;
 
-  if (isOnlyAttachmentsThreePlus || isOnlyMarkdownLinksFour || isOnlyFileAttachmentsFourPlus || isOnlyPlainImageUrls) {
+  if (isOnlyAttachmentsTwoPlus || isOnlyMarkdownLinksTwo || isOnlyFileAttachmentsTwoPlus || isOnlyPlainImageUrls) {
       const uid = message.author.id;
 
       // Initialize tracking object if not exists
@@ -448,6 +448,22 @@ bot.on('messageCreate', async message => {
         });
       })
       .catch(error => console.log("Couldn't ban bot (free discord nitro) because of the following error: \n" + error));
+  }
+
+  if (autoBan && message.member && message.content.toLowerCase().includes("omg join girl in cam")) {
+    message.member.ban({ deleteMessageSeconds: 43200, reason: "Malware Bot, auto banned!" })
+      .then(() => {
+        console.log("Malware Spam Bot banned (cam girl discord)! Username: " + message.member.displayName);
+        logModerationAction({
+          user: message.author.username,
+          channel: { name: message.channel.name, id: message.channel.id },
+          guildId: message.guild.id,
+          offense: "Malware Link Spam from user without roles",
+          action: "Message Deleted & User Banned",
+          messageObj: { id: message.id, content: message.content }
+        });
+      })
+      .catch(error => console.log("Couldn't ban bot (cam girl discord) because of the following error: \n" + error));
   }
 
   // Discord phishing link detection
