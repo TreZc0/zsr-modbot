@@ -250,32 +250,24 @@ bot.on('messageCreate', async message => {
   const matches = message.content.match(attachRe) || [];
 
   // Remove attachment links and common spam prefixes/formatting
-  let remainder = message.content.replace(attachRe, "").trim();
-  // Remove Discord spoiler tags ||
-  remainder = remainder.replace(/\|\|/g, "").trim();
-  // Remove markdown formatting (bold **, italic *, underline __, strikethrough ~~)
-  remainder = remainder.replace(/\*\*/g, "").replace(/__/g, "").replace(/~~/g, "").replace(/\*/g, "").replace(/_ _/g, "").trim();
+  const remainder = getVisibleMessageText(message.content.replace(attachRe, ""));
 
   const isOnlyAttachmentsTwoPlus = matches.length >= 2 && remainder.length === 0;
 
   // Check for markdown link spam (e.g., [1.jpg](https://imgur.com/a/xyz))
   const markdownLinkRe = /\[([^\]]+)\]\(([^)]+)\)/g;
   const markdownMatches = message.content.match(markdownLinkRe) || [];
-  const markdownRemainder = message.content.replace(markdownLinkRe, "").trim();
+  const markdownRemainder = getVisibleMessageText(message.content.replace(markdownLinkRe, ""));
   const isOnlyMarkdownLinksTwo = markdownMatches.length >= 2 && markdownRemainder.length === 0;
 
   // Check for actual file attachments (uploaded files, not URLs in content)
-  let fileAttachmentRemainder = message.content.trim();
-  // Remove Discord spoiler tags ||
-  fileAttachmentRemainder = fileAttachmentRemainder.replace(/\|\|/g, "").trim();
-  // Remove markdown formatting (bold **, italic *, underline __, strikethrough ~~)
-  fileAttachmentRemainder = fileAttachmentRemainder.replace(/\*\*/g, "").replace(/__/g, "").replace(/~~/g, "").replace(/\*/g, "").replace(/_ _/g, "").trim();
+  const fileAttachmentRemainder = getVisibleMessageText(message.content);
   const isOnlyFileAttachmentsTwoPlus = message.attachments.size >= 2 && fileAttachmentRemainder.length <= 2;
 
   // Check for plain image URL spam (2+ bare image URLs)
   const plainImageUrlRe = /<?https?:\/\/[^\s>]+\.(?:jpg|jpeg|png|gif|webp|bmp)(?:\?[^\s>]*)?>?/gi;
   const plainImageMatches = message.content.match(plainImageUrlRe) || [];
-  const plainImageRemainder = message.content.replace(plainImageUrlRe, "").trim();
+  const plainImageRemainder = getVisibleMessageText(message.content.replace(plainImageUrlRe, ""));
   const isOnlyPlainImageUrls = plainImageMatches.length >= 3 && plainImageRemainder.length === 0;
 
   if (isOnlyAttachmentsTwoPlus || isOnlyMarkdownLinksTwo || isOnlyFileAttachmentsTwoPlus || isOnlyPlainImageUrls) {
@@ -299,6 +291,18 @@ bot.on('messageCreate', async message => {
       // Ban if spam detected in 2+ different channels
       if (botSpamScreenShotCheckObj[uid].count >= 2) {
           message.delete().catch(() => {});
+          const moderationLog = {
+              user: message.author.username,
+              channel: { name: message.channel.name, id: message.channel.id },
+              guildId: message.guild.id,
+              offense: "Mass Screenshots spam",
+              action: "Message Deleted & User Banned",
+              messageObj: {
+                  id: message.id,
+                  content: message.content,
+                  att: getAttachmentLogValue(message)
+              }
+          };
 
           // Fetch member if not available
           let member = message.member;
@@ -307,28 +311,32 @@ bot.on('messageCreate', async message => {
                   member = await message.guild.members.fetch(message.author.id);
               } catch (error) {
                   console.log("Couldn't fetch member for screenshot spam ban in guild " + message.guild.name + ": " + error);
+                  logModerationAction({
+                      ...moderationLog,
+                      offense: "Mass Screenshots spam - member fetch failed",
+                      action: "Message Deleted & Ban Failed"
+                  });
                   delete botSpamScreenShotCheckObj[uid];
                   return;
               }
           }
 
-          member.ban({
-              deleteMessageSeconds: 43200,
-              reason: "Spam Bot with mass screenshots, auto banned!"
-          })
-          .then(() => console.log(`Spam Bot with mass screenshots banned! Username: ${message.author.username}`))
-        .catch(error => console.log("Couldn't ban bot (mass screenshots) in guild " + message.guild.name + " because of the following error: \n" + error));
-
-          delete botSpamScreenShotCheckObj[uid];
-
-          logModerationAction({
-              user: message.author.username,
-              channel: { name: message.channel.name, id: message.channel.id },
-              guildId: message.guild.id,
-              offense: "Mass Screenshots spam",
-              action: "Message Deleted & User Banned",
-              messageObj: { id: message.id, content: message.content }
-          });
+          try {
+              await member.ban({
+                  deleteMessageSeconds: 43200,
+                  reason: "Spam Bot with mass screenshots, auto banned!"
+              });
+              console.log(`Spam Bot with mass screenshots banned! Username: ${message.author.username}`);
+              logModerationAction(moderationLog);
+          } catch (error) {
+              console.log("Couldn't ban bot (mass screenshots) in guild " + message.guild.name + " because of the following error: \n" + error);
+              logModerationAction({
+                  ...moderationLog,
+                  action: "Message Deleted & Ban Failed"
+              });
+          } finally {
+              delete botSpamScreenShotCheckObj[uid];
+          }
       }
   }
 
@@ -550,6 +558,37 @@ bot.on('messageCreate', async message => {
   }
 });
 
+function getVisibleMessageText(content) {
+  return content
+    .replace(/\|\|/g, "")
+    .replace(/\*\*/g, "")
+    .replace(/__/g, "")
+    .replace(/~~/g, "")
+    .replace(/\*/g, "")
+    .replace(/_ _/g, "")
+    .replace(/[\p{Cf}\uFEFF]/gu, "")
+    .trim();
+}
+
+function truncateFieldValue(value) {
+  if (!value || getVisibleMessageText(value).length === 0) {
+    return "[no visible text]";
+  }
+
+  return value.substring(0, 1024);
+}
+
+function getAttachmentLogValue(message) {
+  if (!message.attachments || message.attachments.size === 0) {
+    return "";
+  }
+
+  return Array.from(message.attachments.values())
+    .map(att => `${att.name || "attachment"}: ${att.url}`)
+    .join("\n")
+    .substring(0, 1024);
+}
+
 // Check for banned file attachments
 function bannedAttachmentCheck(message) {
   const author = message.author;
@@ -642,7 +681,7 @@ function logModerationAction(actionObj) {
       },
       {
         name: "Original Message",
-        value: actionObj.messageObj.content.substring(0, 1024), // Discord field limit
+        value: truncateFieldValue(actionObj.messageObj.content),
         inline: true
       }
     ]
@@ -651,7 +690,7 @@ function logModerationAction(actionObj) {
   if (actionObj.messageObj.att && actionObj.messageObj.att.length > 0) {
     embed.fields.push({
       name: "Message Attachment(s)",
-      value: actionObj.messageObj.att,
+      value: truncateFieldValue(actionObj.messageObj.att),
       inline: true
     });
   }
