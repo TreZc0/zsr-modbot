@@ -10,6 +10,7 @@ const configFile = './config.json';
 const config = jsonfile.readFileSync(configFile);
 
 const discordToken = config["discord-token"];
+const adminUserID = config["adminUserID"];
 
 // State management
 const stateFile = './state.json';
@@ -589,6 +590,81 @@ function getAttachmentLogValue(message) {
     .substring(0, 1024);
 }
 
+function truncateText(value, maxLength) {
+  const text = String(value || "");
+  if (text.length <= maxLength) {
+    return text;
+  }
+
+  return text.substring(0, maxLength - 15) + "...[truncated]";
+}
+
+function formatError(error) {
+  if (!error) {
+    return "";
+  }
+
+  if (typeof error === "string") {
+    return error;
+  }
+
+  if (error.stack) {
+    return error.stack;
+  }
+
+  if (error.message) {
+    return error.message;
+  }
+
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
+}
+
+function buildAdminFallbackMessage(actionObj, reason, error) {
+  const guildId = actionObj.guildId;
+  const guild = bot.guilds.cache.get(guildId);
+  const channelName = actionObj.channel?.name || "[unknown channel]";
+  const channelId = actionObj.channel?.id || "[unknown channel id]";
+  const messageId = actionObj.messageObj?.id || "[unknown message id]";
+  const messageLink = guildId && channelId !== "[unknown channel id]" && messageId !== "[unknown message id]"
+    ? `https://discord.com/channels/${guildId}/${channelId}/${messageId}`
+    : "[unavailable]";
+  const errorText = formatError(error);
+  const originalText = truncateFieldValue(actionObj.messageObj?.content || "");
+  const attachmentText = actionObj.messageObj?.att
+    ? `\nAttachments: ${truncateText(actionObj.messageObj.att, 500)}`
+    : "";
+
+  return truncateText([
+    "Moderation log delivery failed.",
+    `Server: ${guild ? `${guild.name} (${guild.id})` : guildId}`,
+    `Failure: ${reason}`,
+    errorText ? `Error: ${truncateText(errorText, 700)}` : "",
+    `Action: ${actionObj.action}`,
+    `Offense: ${actionObj.offense}`,
+    `User: ${actionObj.user}`,
+    `Channel: ${channelName} (${channelId})`,
+    `Message: ${messageLink}`,
+    `Original message: ${truncateText(originalText, 300)}${attachmentText}`
+  ].filter(Boolean).join("\n"), 1900);
+}
+
+function dmAdminModerationLogFailure(actionObj, reason, error) {
+  if (!adminUserID) {
+    console.log("No adminUserID set in config.json - cannot DM moderation log failure.");
+    return;
+  }
+
+  bot.users.fetch(adminUserID)
+    .then(adminUser => adminUser.send(buildAdminFallbackMessage(actionObj, reason, error)))
+    .catch(dmError => {
+      console.error(`Couldn't DM admin user ${adminUserID} about moderation log failure:`, dmError);
+    });
+}
+
 // Check for banned file attachments
 function bannedAttachmentCheck(message) {
   const author = message.author;
@@ -647,13 +723,16 @@ function logModerationAction(actionObj) {
   const guildId = actionObj.guildId;
 
   if (!state[guildId] || !state[guildId].moderationChannelId) {
-    console.log("No moderation channel set for guild " + guildId + "- cannot log event!");
+    dmAdminModerationLogFailure(actionObj, "No moderation channel configured for this server");
     return;
   }
 
   const channel = bot.guilds.cache.get(guildId)?.channels.cache.get(state[guildId].moderationChannelId);
   if (!channel) {
-    console.log("Moderation channel not found.");
+    dmAdminModerationLogFailure(
+      actionObj,
+      `Configured moderation channel ${state[guildId].moderationChannelId} was not found`
+    );
     return;
   }
 
@@ -697,6 +776,7 @@ function logModerationAction(actionObj) {
 
   channel.send({ embeds: [embed] }).catch((e) => {
     console.error("Error sending moderation log:", e);
+    dmAdminModerationLogFailure(actionObj, "Discord rejected or failed the moderation channel log send", e);
   });
 }
 
