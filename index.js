@@ -90,7 +90,10 @@ async function registerSlashCommands(guild) {
           .setDescription('List all banned file extensions')),
     new Discord.SlashCommandBuilder()
       .setName('modbot-help')
-      .setDescription('Show available commands and usage')
+      .setDescription('Show available commands and usage'),
+    new Discord.SlashCommandBuilder()
+      .setName('modbot-info')
+      .setDescription('Show current bot configuration')
   ];
 
   try {
@@ -162,12 +165,47 @@ bot.on('interactionCreate', async interaction => {
       return;
     }
 
+    const botPerms = channel.permissionsFor(interaction.guild.members.me);
+    const canWrite = botPerms && botPerms.has(Discord.PermissionFlagsBits.ViewChannel) && botPerms.has(Discord.PermissionFlagsBits.SendMessages);
+
     guildState.moderationChannelId = channel.id;
     console.log(`New monitoring channel ${channel.id} set for guild ${interaction.guildId} by user: ${interaction.member.displayName}`);
     commitState();
 
     await interaction.reply({
-      content: `Moderation events will now be logged to ${channel}. Please make sure the bot has write access to that channel.`,
+      content: canWrite
+        ? `Moderation events will now be logged to ${channel}.`
+        : `Moderation events will now be logged to ${channel}. Warning: the bot currently lacks permission to write there — please grant it View Channel and Send Messages access.`,
+      flags: Discord.MessageFlags.Ephemeral
+    });
+  } else if (interaction.commandName === 'modbot-info') {
+    if (!interaction.member.permissions.has(Discord.PermissionFlagsBits.ManageGuild)) {
+      await interaction.reply({
+        content: 'You need Manage Server permission to use this command.',
+        flags: Discord.MessageFlags.Ephemeral
+      });
+      return;
+    }
+
+    const logChannelId = guildState.moderationChannelId;
+    let logChannelText;
+    if (logChannelId) {
+      const botPerms = interaction.guild.channels.cache.get(logChannelId)?.permissionsFor(interaction.guild.members.me);
+      const canWrite = botPerms && botPerms.has(Discord.PermissionFlagsBits.ViewChannel) && botPerms.has(Discord.PermissionFlagsBits.SendMessages);
+      logChannelText = `<#${logChannelId}>${canWrite ? '' : ' (bot lacks write permission)'}`;
+    } else {
+      logChannelText = 'Not configured — use `/monitor-channel` to set one.';
+    }
+
+    await interaction.reply({
+      embeds: [{
+        title: 'ZSR ModBot Info',
+        color: 0x0099ff,
+        fields: [
+          { name: 'Log Channel', value: logChannelText }
+        ],
+        footer: { text: 'ZSR ModBot' }
+      }],
       flags: Discord.MessageFlags.Ephemeral
     });
   } else if (interaction.commandName === 'banned-extensions') {
