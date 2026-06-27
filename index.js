@@ -10,6 +10,7 @@ const configFile = './config.json';
 const config = jsonfile.readFileSync(configFile);
 
 const discordToken = config["discord-token"];
+const adminUserID = config["adminUserID"];
 
 // State management
 const stateFile = './state.json';
@@ -37,17 +38,6 @@ let botSpamScreenShotCheckObj = {};
 
 // Constants
 const autoBan = true;
-
-function cleanupMessageFormatting(content) {
-  return content
-    .replace(/\|\|/g, "")
-    .replace(/\*\*/g, "")
-    .replace(/__/g, "")
-    .replace(/~~/g, "")
-    .replace(/\*/g, "")
-    .replace(/_ _/g, "")
-    .trim();
-}
 
 function getPingSignature(content) {
   const pingRe = /<@!?\d+>|<@&\d+>|@everyone|@here/g;
@@ -115,7 +105,10 @@ async function registerSlashCommands(guild) {
           .setDescription('List all banned file extensions')),
     new Discord.SlashCommandBuilder()
       .setName('modbot-help')
-      .setDescription('Show available commands and usage')
+      .setDescription('Show available commands and usage'),
+    new Discord.SlashCommandBuilder()
+      .setName('modbot-info')
+      .setDescription('Show current bot configuration')
   ];
 
   try {
@@ -187,12 +180,47 @@ bot.on('interactionCreate', async interaction => {
       return;
     }
 
+    const botPerms = channel.permissionsFor(interaction.guild.members.me);
+    const canWrite = botPerms && botPerms.has(Discord.PermissionFlagsBits.ViewChannel) && botPerms.has(Discord.PermissionFlagsBits.SendMessages);
+
     guildState.moderationChannelId = channel.id;
     console.log(`New monitoring channel ${channel.id} set for guild ${interaction.guildId} by user: ${interaction.member.displayName}`);
     commitState();
 
     await interaction.reply({
-      content: `Moderation events will now be logged to ${channel}. Please make sure the bot has write access to that channel.`,
+      content: canWrite
+        ? `Moderation events will now be logged to ${channel}.`
+        : `Moderation events will now be logged to ${channel}. Warning: the bot currently lacks permission to write there — please grant it View Channel and Send Messages access.`,
+      flags: Discord.MessageFlags.Ephemeral
+    });
+  } else if (interaction.commandName === 'modbot-info') {
+    if (!interaction.member.permissions.has(Discord.PermissionFlagsBits.ManageGuild)) {
+      await interaction.reply({
+        content: 'You need Manage Server permission to use this command.',
+        flags: Discord.MessageFlags.Ephemeral
+      });
+      return;
+    }
+
+    const logChannelId = guildState.moderationChannelId;
+    let logChannelText;
+    if (logChannelId) {
+      const botPerms = interaction.guild.channels.cache.get(logChannelId)?.permissionsFor(interaction.guild.members.me);
+      const canWrite = botPerms && botPerms.has(Discord.PermissionFlagsBits.ViewChannel) && botPerms.has(Discord.PermissionFlagsBits.SendMessages);
+      logChannelText = `<#${logChannelId}>${canWrite ? '' : ' (bot lacks write permission)'}`;
+    } else {
+      logChannelText = 'Not configured — use `/monitor-channel` to set one.';
+    }
+
+    await interaction.reply({
+      embeds: [{
+        title: 'ZSR ModBot Info',
+        color: 0x0099ff,
+        fields: [
+          { name: 'Log Channel', value: logChannelText }
+        ],
+        footer: { text: 'ZSR ModBot' }
+      }],
       flags: Discord.MessageFlags.Ephemeral
     });
   } else if (interaction.commandName === 'banned-extensions') {
@@ -276,24 +304,24 @@ bot.on('messageCreate', async message => {
   const matches = message.content.match(attachRe) || [];
 
   // Remove attachment links and common spam prefixes/formatting
-  let remainder = cleanupMessageFormatting(message.content.replace(attachRe, ""));
+  const remainder = getVisibleMessageText(message.content.replace(attachRe, ""));
 
-  const isOnlyAttachmentsThreePlus = matches.length >= 3 && remainder.length === 0;
+  const isOnlyAttachmentsTwoPlus = matches.length >= 2 && remainder.length === 0;
 
   // Check for markdown link spam (e.g., [1.jpg](https://imgur.com/a/xyz))
   const markdownLinkRe = /\[([^\]]+)\]\(([^)]+)\)/g;
   const markdownMatches = message.content.match(markdownLinkRe) || [];
-  const markdownRemainder = cleanupMessageFormatting(message.content.replace(markdownLinkRe, ""));
-  const isOnlyMarkdownLinksFour = markdownMatches.length === 4 && markdownRemainder.length === 0;
+  const markdownRemainder = getVisibleMessageText(message.content.replace(markdownLinkRe, ""));
+  const isOnlyMarkdownLinksTwo = markdownMatches.length >= 2 && markdownRemainder.length === 0;
 
   // Check for actual file attachments (uploaded files, not URLs in content)
-  let fileAttachmentRemainder = cleanupMessageFormatting(message.content);
-  const isOnlyFileAttachmentsFourPlus = message.attachments.size >= 4 && fileAttachmentRemainder.length <= 2;
+  const fileAttachmentRemainder = getVisibleMessageText(message.content);
+  const isOnlyFileAttachmentsTwoPlus = message.attachments.size >= 2 && fileAttachmentRemainder.length <= 2;
 
-  // Check for plain image URL spam (3+ bare image URLs)
+  // Check for plain image URL spam (2+ bare image URLs)
   const plainImageUrlRe = /<?https?:\/\/[^\s>]+\.(?:jpg|jpeg|png|gif|webp|bmp)(?:\?[^\s>]*)?>?/gi;
   const plainImageMatches = message.content.match(plainImageUrlRe) || [];
-  const plainImageRemainder = cleanupMessageFormatting(message.content.replace(plainImageUrlRe, ""));
+  const plainImageRemainder = getVisibleMessageText(message.content.replace(plainImageUrlRe, ""));
   const isOnlyPlainImageUrls = plainImageMatches.length >= 3 && plainImageRemainder.length === 0;
 
   const plainImageMatchesForCount = message.content
@@ -301,7 +329,7 @@ bot.on('messageCreate', async message => {
       .replace(markdownLinkRe, "")
       .match(plainImageUrlRe) || [];
   const screenshotCount = matches.length + markdownMatches.length + plainImageMatchesForCount.length + message.attachments.size;
-  const nonScreenshotContent = cleanupMessageFormatting(
+  const nonScreenshotContent = getVisibleMessageText(
       message.content
           .replace(attachRe, "")
           .replace(markdownLinkRe, "")
@@ -310,7 +338,7 @@ bot.on('messageCreate', async message => {
   const pingSignature = getPingSignature(nonScreenshotContent);
   const isScreenshotsWithOnlyPings = screenshotCount >= 2 && pingSignature !== null;
 
-  const isScreenshotSpam = isOnlyAttachmentsThreePlus || isOnlyMarkdownLinksFour || isOnlyFileAttachmentsFourPlus || isOnlyPlainImageUrls;
+  const isScreenshotSpam = isOnlyAttachmentsTwoPlus || isOnlyMarkdownLinksTwo || isOnlyFileAttachmentsTwoPlus || isOnlyPlainImageUrls;
 
   if (isScreenshotSpam || isScreenshotsWithOnlyPings) {
       const uid = message.author.id;
@@ -353,6 +381,18 @@ bot.on('messageCreate', async message => {
       // Ban if spam detected in 2+ different channels
       if (hasScreenshotSpamInMultipleChannels || hasIdenticalPingScreenshots) {
           message.delete().catch(() => {});
+          const moderationLog = {
+              user: message.author.username,
+              channel: { name: message.channel.name, id: message.channel.id },
+              guildId: message.guild.id,
+              offense: "Mass Screenshots spam",
+              action: "Message Deleted & User Banned",
+              messageObj: {
+                  id: message.id,
+                  content: message.content,
+                  att: getAttachmentLogValue(message)
+              }
+          };
 
           // Fetch member if not available
           let member = message.member;
@@ -360,29 +400,33 @@ bot.on('messageCreate', async message => {
               try {
                   member = await message.guild.members.fetch(message.author.id);
               } catch (error) {
-                  console.log("Couldn't fetch member for screenshot spam ban: " + error);
+                  console.log("Couldn't fetch member for screenshot spam ban in guild " + message.guild.name + ": " + error);
+                  logModerationAction({
+                      ...moderationLog,
+                      offense: "Mass Screenshots spam - member fetch failed",
+                      action: "Message Deleted & Ban Failed"
+                  });
                   delete botSpamScreenShotCheckObj[uid];
                   return;
               }
           }
 
-          member.ban({
-              deleteMessageSeconds: 43200,
-              reason: "Spam Bot with mass screenshots, auto banned!"
-          })
-          .then(() => console.log(`Spam Bot with mass screenshots banned! Username: ${message.author.username}`))
-        .catch(error => console.log("Couldn't ban bot (mass screenshots) because of the following error: \n" + error));
-
-          delete botSpamScreenShotCheckObj[uid];
-
-          logModerationAction({
-              user: message.author.username,
-              channel: { name: message.channel.name, id: message.channel.id },
-              guildId: message.guild.id,
-              offense: "Mass Screenshots spam",
-              action: "Message Deleted & User Banned",
-              messageObj: { id: message.id, content: message.content }
-          });
+          try {
+              await member.ban({
+                  deleteMessageSeconds: 43200,
+                  reason: "Spam Bot with mass screenshots, auto banned!"
+              });
+              console.log(`Spam Bot with mass screenshots banned! Username: ${message.author.username}`);
+              logModerationAction(moderationLog);
+          } catch (error) {
+              console.log("Couldn't ban bot (mass screenshots) in guild " + message.guild.name + " because of the following error: \n" + error);
+              logModerationAction({
+                  ...moderationLog,
+                  action: "Message Deleted & Ban Failed"
+              });
+          } finally {
+              delete botSpamScreenShotCheckObj[uid];
+          }
       }
   }
 
@@ -504,6 +548,22 @@ bot.on('messageCreate', async message => {
       .catch(error => console.log("Couldn't ban bot (free discord nitro) because of the following error: \n" + error));
   }
 
+  if (autoBan && message.member && message.content.toLowerCase().includes("omg join girl in cam")) {
+    message.member.ban({ deleteMessageSeconds: 43200, reason: "Malware Bot, auto banned!" })
+      .then(() => {
+        console.log("Malware Spam Bot banned (cam girl discord)! Username: " + message.member.displayName);
+        logModerationAction({
+          user: message.author.username,
+          channel: { name: message.channel.name, id: message.channel.id },
+          guildId: message.guild.id,
+          offense: "Malware Link Spam from user without roles",
+          action: "Message Deleted & User Banned",
+          messageObj: { id: message.id, content: message.content }
+        });
+      })
+      .catch(error => console.log("Couldn't ban bot (cam girl discord) because of the following error: \n" + error));
+  }
+
   // Discord phishing link detection
   if (autoBan && message.member && message.member.roles.cache.size < 2 &&
     (/[\b\/]d(?!isc)[0-9a-zA-Z]{1,}ord-g[0-9a-zA-Z]{1,}\./g.test(message.content.toLowerCase()) ||
@@ -588,6 +648,112 @@ bot.on('messageCreate', async message => {
   }
 });
 
+function getVisibleMessageText(content) {
+  return content
+    .replace(/\|\|/g, "")
+    .replace(/\*\*/g, "")
+    .replace(/__/g, "")
+    .replace(/~~/g, "")
+    .replace(/\*/g, "")
+    .replace(/_ _/g, "")
+    .replace(/[\p{Cf}\uFEFF]/gu, "")
+    .trim();
+}
+
+function truncateFieldValue(value) {
+  if (!value || getVisibleMessageText(value).length === 0) {
+    return "[no visible text]";
+  }
+
+  return value.substring(0, 1024);
+}
+
+function getAttachmentLogValue(message) {
+  if (!message.attachments || message.attachments.size === 0) {
+    return "";
+  }
+
+  return Array.from(message.attachments.values())
+    .map(att => `${att.name || "attachment"}: ${att.url}`)
+    .join("\n")
+    .substring(0, 1024);
+}
+
+function truncateText(value, maxLength) {
+  const text = String(value || "");
+  if (text.length <= maxLength) {
+    return text;
+  }
+
+  return text.substring(0, maxLength - 15) + "...[truncated]";
+}
+
+function formatError(error) {
+  if (!error) {
+    return "";
+  }
+
+  if (typeof error === "string") {
+    return error;
+  }
+
+  if (error.stack) {
+    return error.stack;
+  }
+
+  if (error.message) {
+    return error.message;
+  }
+
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
+}
+
+function buildAdminFallbackMessage(actionObj, reason, error) {
+  const guildId = actionObj.guildId;
+  const guild = bot.guilds.cache.get(guildId);
+  const channelName = actionObj.channel?.name || "[unknown channel]";
+  const channelId = actionObj.channel?.id || "[unknown channel id]";
+  const messageId = actionObj.messageObj?.id || "[unknown message id]";
+  const messageLink = guildId && channelId !== "[unknown channel id]" && messageId !== "[unknown message id]"
+    ? `https://discord.com/channels/${guildId}/${channelId}/${messageId}`
+    : "[unavailable]";
+  const errorText = formatError(error);
+  const originalText = truncateFieldValue(actionObj.messageObj?.content || "");
+  const attachmentText = actionObj.messageObj?.att
+    ? `\nAttachments: ${truncateText(actionObj.messageObj.att, 500)}`
+    : "";
+
+  return truncateText([
+    "Moderation log delivery failed.",
+    `Server: ${guild ? `${guild.name} (${guild.id})` : guildId}`,
+    `Failure: ${reason}`,
+    errorText ? `Error: ${truncateText(errorText, 700)}` : "",
+    `Action: ${actionObj.action}`,
+    `Offense: ${actionObj.offense}`,
+    `User: ${actionObj.user}`,
+    `Channel: ${channelName} (${channelId})`,
+    `Message: ${messageLink}`,
+    `Original message: ${truncateText(originalText, 300)}${attachmentText}`
+  ].filter(Boolean).join("\n"), 1900);
+}
+
+function dmAdminModerationLogFailure(actionObj, reason, error) {
+  if (!adminUserID) {
+    console.log("No adminUserID set in config.json - cannot DM moderation log failure.");
+    return;
+  }
+
+  bot.users.fetch(adminUserID)
+    .then(adminUser => adminUser.send(buildAdminFallbackMessage(actionObj, reason, error)))
+    .catch(dmError => {
+      console.error(`Couldn't DM admin user ${adminUserID} about moderation log failure:`, dmError);
+    });
+}
+
 // Check for banned file attachments
 function bannedAttachmentCheck(message) {
   const author = message.author;
@@ -646,13 +812,16 @@ function logModerationAction(actionObj) {
   const guildId = actionObj.guildId;
 
   if (!state[guildId] || !state[guildId].moderationChannelId) {
-    console.log("No moderation channel set for guild " + guildId + "- cannot log event!");
+    dmAdminModerationLogFailure(actionObj, "No moderation channel configured for this server");
     return;
   }
 
   const channel = bot.guilds.cache.get(guildId)?.channels.cache.get(state[guildId].moderationChannelId);
   if (!channel) {
-    console.log("Moderation channel not found.");
+    dmAdminModerationLogFailure(
+      actionObj,
+      `Configured moderation channel ${state[guildId].moderationChannelId} was not found`
+    );
     return;
   }
 
@@ -680,7 +849,7 @@ function logModerationAction(actionObj) {
       },
       {
         name: "Original Message",
-        value: actionObj.messageObj.content.substring(0, 1024), // Discord field limit
+        value: truncateFieldValue(actionObj.messageObj.content),
         inline: true
       }
     ]
@@ -689,13 +858,14 @@ function logModerationAction(actionObj) {
   if (actionObj.messageObj.att && actionObj.messageObj.att.length > 0) {
     embed.fields.push({
       name: "Message Attachment(s)",
-      value: actionObj.messageObj.att,
+      value: truncateFieldValue(actionObj.messageObj.att),
       inline: true
     });
   }
 
   channel.send({ embeds: [embed] }).catch((e) => {
     console.error("Error sending moderation log:", e);
+    dmAdminModerationLogFailure(actionObj, "Discord rejected or failed the moderation channel log send", e);
   });
 }
 
