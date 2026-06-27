@@ -38,6 +38,32 @@ let botSpamScreenShotCheckObj = {};
 // Constants
 const autoBan = true;
 
+function cleanupMessageFormatting(content) {
+  return content
+    .replace(/\|\|/g, "")
+    .replace(/\*\*/g, "")
+    .replace(/__/g, "")
+    .replace(/~~/g, "")
+    .replace(/\*/g, "")
+    .replace(/_ _/g, "")
+    .trim();
+}
+
+function getPingSignature(content) {
+  const pingRe = /<@!?\d+>|<@&\d+>|@everyone|@here/g;
+  const pings = content.match(pingRe) || [];
+  const remainder = content.replace(pingRe, "").trim();
+
+  if (pings.length === 0 || remainder.length > 0) {
+    return null;
+  }
+
+  return pings
+    .map(ping => ping.replace(/^<@!(\d+)>$/, "<@$1>"))
+    .sort()
+    .join("|");
+}
+
 // Bot ready event
 bot.on('clientReady', () => {
   console.log('Logged in as %s - %s', bot.user.username, bot.user.id);
@@ -250,40 +276,54 @@ bot.on('messageCreate', async message => {
   const matches = message.content.match(attachRe) || [];
 
   // Remove attachment links and common spam prefixes/formatting
-  let remainder = message.content.replace(attachRe, "").trim();
-  // Remove Discord spoiler tags ||
-  remainder = remainder.replace(/\|\|/g, "").trim();
-  // Remove markdown formatting (bold **, italic *, underline __, strikethrough ~~)
-  remainder = remainder.replace(/\*\*/g, "").replace(/__/g, "").replace(/~~/g, "").replace(/\*/g, "").replace(/_ _/g, "").trim();
+  let remainder = cleanupMessageFormatting(message.content.replace(attachRe, ""));
 
   const isOnlyAttachmentsThreePlus = matches.length >= 3 && remainder.length === 0;
 
   // Check for markdown link spam (e.g., [1.jpg](https://imgur.com/a/xyz))
   const markdownLinkRe = /\[([^\]]+)\]\(([^)]+)\)/g;
   const markdownMatches = message.content.match(markdownLinkRe) || [];
-  const markdownRemainder = message.content.replace(markdownLinkRe, "").trim();
+  const markdownRemainder = cleanupMessageFormatting(message.content.replace(markdownLinkRe, ""));
   const isOnlyMarkdownLinksFour = markdownMatches.length === 4 && markdownRemainder.length === 0;
 
   // Check for actual file attachments (uploaded files, not URLs in content)
-  let fileAttachmentRemainder = message.content.trim();
-  // Remove Discord spoiler tags ||
-  fileAttachmentRemainder = fileAttachmentRemainder.replace(/\|\|/g, "").trim();
-  // Remove markdown formatting (bold **, italic *, underline __, strikethrough ~~)
-  fileAttachmentRemainder = fileAttachmentRemainder.replace(/\*\*/g, "").replace(/__/g, "").replace(/~~/g, "").replace(/\*/g, "").replace(/_ _/g, "").trim();
+  let fileAttachmentRemainder = cleanupMessageFormatting(message.content);
   const isOnlyFileAttachmentsFourPlus = message.attachments.size >= 4 && fileAttachmentRemainder.length <= 2;
 
   // Check for plain image URL spam (3+ bare image URLs)
   const plainImageUrlRe = /<?https?:\/\/[^\s>]+\.(?:jpg|jpeg|png|gif|webp|bmp)(?:\?[^\s>]*)?>?/gi;
   const plainImageMatches = message.content.match(plainImageUrlRe) || [];
-  const plainImageRemainder = message.content.replace(plainImageUrlRe, "").trim();
+  const plainImageRemainder = cleanupMessageFormatting(message.content.replace(plainImageUrlRe, ""));
   const isOnlyPlainImageUrls = plainImageMatches.length >= 3 && plainImageRemainder.length === 0;
 
-  if (isOnlyAttachmentsThreePlus || isOnlyMarkdownLinksFour || isOnlyFileAttachmentsFourPlus || isOnlyPlainImageUrls) {
+  const plainImageMatchesForCount = message.content
+      .replace(attachRe, "")
+      .replace(markdownLinkRe, "")
+      .match(plainImageUrlRe) || [];
+  const screenshotCount = matches.length + markdownMatches.length + plainImageMatchesForCount.length + message.attachments.size;
+  const nonScreenshotContent = cleanupMessageFormatting(
+      message.content
+          .replace(attachRe, "")
+          .replace(markdownLinkRe, "")
+          .replace(plainImageUrlRe, "")
+  );
+  const pingSignature = getPingSignature(nonScreenshotContent);
+  const isScreenshotsWithOnlyPings = screenshotCount >= 2 && pingSignature !== null;
+
+  const isScreenshotSpam = isOnlyAttachmentsThreePlus || isOnlyMarkdownLinksFour || isOnlyFileAttachmentsFourPlus || isOnlyPlainImageUrls;
+
+  if (isScreenshotSpam || isScreenshotsWithOnlyPings) {
       const uid = message.author.id;
 
       // Initialize tracking object if not exists
       if (!(uid in botSpamScreenShotCheckObj)) {
-          botSpamScreenShotCheckObj[uid] = { count: 0, channels: new Set() };
+          botSpamScreenShotCheckObj[uid] = {
+              count: 0,
+              channels: new Set(),
+              screenshotSpamChannels: new Set(),
+              pingScreenshotChannels: new Set(),
+              pingSignatures: []
+          };
           setTimeout(() => {
               if (uid in botSpamScreenShotCheckObj)
                   delete botSpamScreenShotCheckObj[uid];
@@ -296,8 +336,22 @@ bot.on('messageCreate', async message => {
           botSpamScreenShotCheckObj[uid].count++;
       }
 
+      if (isScreenshotSpam) {
+          botSpamScreenShotCheckObj[uid].screenshotSpamChannels.add(message.channel.id);
+      }
+
+      if (isScreenshotsWithOnlyPings && !botSpamScreenShotCheckObj[uid].pingScreenshotChannels.has(message.channel.id)) {
+          botSpamScreenShotCheckObj[uid].pingScreenshotChannels.add(message.channel.id);
+          botSpamScreenShotCheckObj[uid].pingSignatures.push(pingSignature);
+      }
+
+      const trackedPingSignatures = botSpamScreenShotCheckObj[uid].pingSignatures;
+      const hasIdenticalPingScreenshots = botSpamScreenShotCheckObj[uid].pingScreenshotChannels.size >= 2 &&
+          trackedPingSignatures.every(signature => signature !== null && signature === trackedPingSignatures[0]);
+      const hasScreenshotSpamInMultipleChannels = botSpamScreenShotCheckObj[uid].screenshotSpamChannels.size >= 2;
+
       // Ban if spam detected in 2+ different channels
-      if (botSpamScreenShotCheckObj[uid].count >= 2) {
+      if (hasScreenshotSpamInMultipleChannels || hasIdenticalPingScreenshots) {
           message.delete().catch(() => {});
 
           // Fetch member if not available

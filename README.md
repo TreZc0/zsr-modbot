@@ -130,7 +130,7 @@ const autoBan = false; // Default: true
 
 ## Spam Patterns Detected
 
-1. **Mass Screenshots**: 3+ Discord attachment URLs with no text
+1. **Mass Screenshots**: 3+ image/attachment links with no text, or 2+ screenshots with only identical pings across tracked messages
 2. **Everyone/Here Pings**: Users without permission trying to ping everyone
 3. **Mass User Mentions**: 6+ user mentions from users with <2 roles
 4. **Nitro Scams**: "nitro for free" or "free discord nitro"
