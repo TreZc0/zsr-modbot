@@ -7,7 +7,7 @@ const configFile = './config.json';
 const config = jsonfile.readFileSync(configFile);
 
 const discordToken = config["discord-token"];
-const adminUserIDs = getConfiguredAdminUserIDs(config);
+const adminUserID = config["adminUserID"];
 
 // State management
 const stateFile = './state.json';
@@ -654,20 +654,8 @@ bot.on('messageCreate', async message => {
   }
 });
 
-function getConfiguredAdminUserIDs(configObj) {
-  if (Array.isArray(configObj.adminUserIDs)) {
-    return configObj.adminUserIDs.map(String).filter(Boolean);
-  }
-
-  if (configObj.adminUserID) {
-    return [String(configObj.adminUserID)];
-  }
-
-  return [];
-}
-
 function isConfiguredAdmin(userId) {
-  return adminUserIDs.includes(String(userId));
+  return Boolean(adminUserID) && String(userId) === String(adminUserID);
 }
 
 async function handleAdminForwardedMessage(message) {
@@ -1194,18 +1182,16 @@ function buildAdminFallbackMessage(actionObj, reason, error) {
 }
 
 function dmAdminModerationLogFailure(actionObj, reason, error) {
-  if (adminUserIDs.length === 0) {
-    console.log("No adminUserID/adminUserIDs set in config.json - cannot DM moderation log failure.");
+  if (!adminUserID) {
+    console.log("No adminUserID set in config.json - cannot DM moderation log failure.");
     return;
   }
 
-  adminUserIDs.forEach(adminId => {
-    bot.users.fetch(adminId)
-      .then(adminUser => adminUser.send(buildAdminFallbackMessage(actionObj, reason, error)))
-      .catch(dmError => {
-        console.error(`Couldn't DM admin user ${adminId} about moderation log failure:`, dmError);
-      });
-  });
+  bot.users.fetch(adminUserID)
+    .then(adminUser => adminUser.send(buildAdminFallbackMessage(actionObj, reason, error)))
+    .catch(dmError => {
+      console.error(`Couldn't DM admin user ${adminUserID} about moderation log failure:`, dmError);
+    });
 }
 
 // Check for banned file attachments

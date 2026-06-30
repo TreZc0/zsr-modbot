@@ -63,14 +63,12 @@ npm start
 ```json
 {
   "discord-token": "YOUR_BOT_TOKEN_HERE",
-  "adminUserID": "YOUR_DISCORD_USER_ID",
-  "adminUserIDs": ["YOUR_DISCORD_USER_ID"]
+  "adminUserID": "YOUR_DISCORD_USER_ID"
 }
 ```
 
 - **discord-token**: Your bot's authentication token
 - **adminUserID**: Discord user ID authorized to DM-forward messages to the bot, and to DM when moderation logging cannot be delivered to the configured channel
-- **adminUserIDs**: Optional list of Discord user IDs authorized to DM-forward messages to the bot. If omitted, the bot falls back to `adminUserID`
 
 ## Usage
 
@@ -139,7 +137,7 @@ All actions are logged with:
 - Original message content
 - Timestamp
 
-If the moderation log channel is missing, not configured, or rejects the log message, the bot will DM the configured `adminUserIDs`/`adminUserID` with the server, moderation action, message link, and delivery failure.
+If the moderation log channel is missing, not configured, or rejects the log message, the bot will DM the configured `adminUserID` with the server, moderation action, message link, and delivery failure.
 
 ### Auto-Ban Toggle
 
@@ -195,7 +193,7 @@ The bot automatically:
 - Run `/monitor-channel` to set the log channel
 - Verify the bot has "Send Messages" permission in that channel
 - Check `state.json` for the saved channel ID
-- Check that `adminUserIDs` or `adminUserID` is set in `config.json` for fallback DMs
+- Check that `adminUserID` is set in `config.json` for fallback DMs
 
 ### Bot can't ban users
 - Ensure the bot's role is higher than the target user's highest role
