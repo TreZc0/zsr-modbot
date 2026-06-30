@@ -1,6 +1,3 @@
-// Discord Moderation Bot
-// Spam protection and automated moderation
-
 const Discord = require('discord.js');
 const jsonfile = require('jsonfile');
 const fs = require('fs');
@@ -10,7 +7,7 @@ const configFile = './config.json';
 const config = jsonfile.readFileSync(configFile);
 
 const discordToken = config["discord-token"];
-const adminUserID = config["adminUserID"];
+const adminUserIDs = getConfiguredAdminUserIDs(config);
 
 // State management
 const stateFile = './state.json';
@@ -27,10 +24,14 @@ const botIntents = [
   Discord.GatewayIntentBits.Guilds,
   Discord.GatewayIntentBits.GuildMembers,
   Discord.GatewayIntentBits.GuildMessages,
+  Discord.GatewayIntentBits.DirectMessages,
   Discord.GatewayIntentBits.MessageContent
 ];
 
-const bot = new Discord.Client({ intents: botIntents });
+const bot = new Discord.Client({
+  intents: botIntents,
+  partials: [Discord.Partials.Channel]
+});
 
 // Spam tracking
 let botSpamCheck = [];
@@ -282,8 +283,13 @@ bot.on('interactionCreate', async interaction => {
 
 // Message handling
 bot.on('messageCreate', async message => {
-  // Ignore DMs and unknown channels
-  if (!message.guild || (message.channel && (message.channel.type === Discord.ChannelType.DM))) {
+  if (!message.guild && message.channel && message.channel.type === Discord.ChannelType.DM) {
+    await handleAdminForwardedMessage(message);
+    return;
+  }
+
+  // Ignore unknown channels
+  if (!message.guild) {
     return;
   }
 
@@ -648,6 +654,452 @@ bot.on('messageCreate', async message => {
   }
 });
 
+function getConfiguredAdminUserIDs(configObj) {
+  if (Array.isArray(configObj.adminUserIDs)) {
+    return configObj.adminUserIDs.map(String).filter(Boolean);
+  }
+
+  if (configObj.adminUserID) {
+    return [String(configObj.adminUserID)];
+  }
+
+  return [];
+}
+
+function isConfiguredAdmin(userId) {
+  return adminUserIDs.includes(String(userId));
+}
+
+async function handleAdminForwardedMessage(message) {
+  if (!isConfiguredAdmin(message.author.id)) {
+    return;
+  }
+
+  const forwardedSnapshot = getForwardedSnapshot(message);
+  if (!forwardedSnapshot) {
+    return;
+  }
+
+  const wantsBan = message.content.trim().toLowerCase() === "ban";
+  const source = await resolveForwardedSource(message, forwardedSnapshot);
+  const messageToAnalyze = source.originalMessage || forwardedSnapshot;
+  const guild = source.guild || messageToAnalyze.guild || null;
+  const member = source.originalMessage
+    ? await fetchGuildMember(guild, source.originalMessage.author.id)
+    : null;
+  const analysis = analyzeMessageAgainstRules(messageToAnalyze, guild, member);
+
+  if (wantsBan) {
+    await banForwardedMessageAuthor(message, source, analysis);
+    return;
+  }
+
+  await message.reply({
+    content: buildForwardedAnalysisReply(source, analysis, false),
+    allowedMentions: { parse: [] }
+  });
+}
+
+function getForwardedSnapshot(message) {
+  if (!message.messageSnapshots || message.messageSnapshots.size === 0) {
+    return null;
+  }
+
+  const snapshot = message.messageSnapshots.first();
+  return snapshot?.message || snapshot || null;
+}
+
+async function resolveForwardedSource(message, forwardedSnapshot) {
+  const reference = message.reference || {};
+  const source = {
+    guildId: reference.guildId || reference.guild_id || null,
+    channelId: reference.channelId || reference.channel_id || null,
+    messageId: reference.messageId || reference.message_id || forwardedSnapshot?.id || null,
+    guild: null,
+    channel: null,
+    originalMessage: null,
+    error: null
+  };
+
+  if (!source.channelId || !source.messageId) {
+    source.error = "Forward reference did not include a source channel/message.";
+    return source;
+  }
+
+  try {
+    source.channel = await bot.channels.fetch(source.channelId);
+    source.guild = source.channel?.guild || (source.guildId ? bot.guilds.cache.get(source.guildId) : null);
+
+    if (!source.guild && source.guildId) {
+      source.guild = await bot.guilds.fetch(source.guildId);
+    }
+
+    if (!source.channel?.messages) {
+      source.error = "Forward source channel could not be read by the bot.";
+      return source;
+    }
+
+    source.originalMessage = await source.channel.messages.fetch(source.messageId);
+    source.guild = source.originalMessage.guild || source.guild;
+  } catch (error) {
+    source.error = formatError(error);
+  }
+
+  return source;
+}
+
+async function fetchGuildMember(guild, userId) {
+  if (!guild || !userId) {
+    return null;
+  }
+
+  try {
+    return await guild.members.fetch(userId);
+  } catch (error) {
+    console.log(`Couldn't fetch forwarded message member ${userId} in guild ${guild.id}: ${error}`);
+    return null;
+  }
+}
+
+function analyzeMessageAgainstRules(message, guild, member) {
+  const content = getMessageContent(message);
+  const normalizedContent = content.toLowerCase();
+  const roleCount = member?.roles?.cache?.size;
+  const lowRoleUser = typeof roleCount === "number" ? roleCount < 2 : null;
+  const mentionCount = getMentionedUserCount(message, content);
+  const guildState = guild && state[guild.id] ? state[guild.id] : null;
+  const matches = [];
+
+  const bannedAttachmentNames = getBannedAttachmentNames(message, guildState);
+  if (bannedAttachmentNames.length > 0) {
+    matches.push({
+      offense: "Banned File Extension",
+      action: "Message deletion and user warning",
+      detail: `Matched attachment(s): ${bannedAttachmentNames.join(", ")}`
+    });
+  }
+
+  if ((content.includes("@everyone") || content.includes("@here"))) {
+    if (member && !member.permissions.has(Discord.PermissionFlagsBits.MentionEveryone)) {
+      matches.push({
+        offense: "Unauthorized Everyone/Here Ping",
+        action: botSpamCheck.includes(member.displayName)
+          ? "Message deletion and user ban"
+          : "Message deletion and warning",
+        detail: "Author does not have Mention Everyone permission."
+      });
+    } else if (!member) {
+      matches.push({
+        offense: "Everyone/Here Ping",
+        action: "Needs original member permissions to decide warning/ban",
+        detail: "The forwarded snapshot does not include member permissions."
+      });
+    }
+  }
+
+  if (autoBan && lowRoleUser === true && mentionCount > 6) {
+    matches.push({
+      offense: "Mass Ping from user without roles",
+      action: "User ban",
+      detail: `Mentioned ${mentionCount} users with ${roleCount} cached role(s).`
+    });
+  } else if (autoBan && lowRoleUser === null && mentionCount > 6) {
+    matches.push({
+      offense: "Mass Ping",
+      action: "Needs original member roles to decide ban",
+      detail: `Mentioned ${mentionCount} users.`
+    });
+  }
+
+  if (autoBan && lowRoleUser === true && normalizedContent.includes("nitro for free")) {
+    matches.push({
+      offense: "Malware Link Spam from user without roles",
+      action: "User ban",
+      detail: "Matched phrase: nitro for free"
+    });
+  }
+
+  if (autoBan && lowRoleUser === true && normalizedContent.includes("free discord nitro")) {
+    matches.push({
+      offense: "Malware Link Spam from user without roles",
+      action: "User ban",
+      detail: "Matched phrase: free discord nitro"
+    });
+  }
+
+  if (autoBan && normalizedContent.includes("omg join girl in cam")) {
+    matches.push({
+      offense: "Malware Link Spam from user without roles",
+      action: "User ban",
+      detail: "Matched phrase: omg join girl in cam"
+    });
+  }
+
+  if (autoBan && lowRoleUser === true && isDiscordPhishingLink(content)) {
+    matches.push({
+      offense: "Malware Link Spam from user without roles",
+      action: "User ban",
+      detail: "Matched Discord phishing/look-alike link pattern."
+    });
+  } else if (autoBan && lowRoleUser === null && isDiscordPhishingLink(content)) {
+    matches.push({
+      offense: "Discord phishing/look-alike link",
+      action: "Needs original member roles to decide ban",
+      detail: "Matched Discord phishing/look-alike link pattern."
+    });
+  }
+
+  if (autoBan && lowRoleUser === true && content.includes("﷽")) {
+    matches.push({
+      offense: "Malware Link Spam from user without roles",
+      action: "User ban",
+      detail: "Matched Arabic character spam pattern."
+    });
+  }
+
+  if (autoBan && lowRoleUser === true &&
+    (content.startsWith("Sex Dating > http://") || content.includes("discord.amazingsexdating.com"))) {
+    matches.push({
+      offense: "Malware Link Spam from user without roles",
+      action: "User ban",
+      detail: "Matched adult content spam pattern."
+    });
+  }
+
+  if (autoBan && lowRoleUser === true &&
+    (content.startsWith("Best Casino Online > http://") || content.includes("gambldiscord.bestoffersx.com"))) {
+    matches.push({
+      offense: "Malware Link Spam (Betting) from user without roles",
+      action: "User ban",
+      detail: "Matched gambling spam pattern."
+    });
+  }
+
+  const screenshotAnalysis = analyzeScreenshotSpamCandidate(message, content);
+  if (screenshotAnalysis) {
+    matches.push(screenshotAnalysis);
+  }
+
+  return {
+    content,
+    matches,
+    attachmentText: getAttachmentLogValueFromAnyMessage(message)
+  };
+}
+
+function getMessageContent(message) {
+  return String(message?.content || "");
+}
+
+function getMessageAttachments(message) {
+  if (!message?.attachments) {
+    return [];
+  }
+
+  if (typeof message.attachments.values === "function") {
+    return Array.from(message.attachments.values());
+  }
+
+  if (Array.isArray(message.attachments)) {
+    return message.attachments;
+  }
+
+  return [];
+}
+
+function getMentionedUserCount(message, content) {
+  const memberMentions = message?.mentions?.members?.size;
+  if (typeof memberMentions === "number" && memberMentions > 0) {
+    return memberMentions;
+  }
+
+  const userMentions = message?.mentions?.users?.size;
+  if (typeof userMentions === "number" && userMentions > 0) {
+    return userMentions;
+  }
+
+  const mentionIds = new Set();
+  const mentionRe = /<@!?(\d+)>/g;
+  let match;
+  while ((match = mentionRe.exec(content)) !== null) {
+    mentionIds.add(match[1]);
+  }
+
+  if (Array.isArray(message?.mentions)) {
+    message.mentions.forEach(mention => {
+      const id = mention?.id || mention?.user?.id;
+      if (id) mentionIds.add(id);
+    });
+  }
+
+  return mentionIds.size;
+}
+
+function getBannedAttachmentNames(message, guildState) {
+  if (!guildState || !guildState.bannedExtensions || guildState.bannedExtensions.length === 0) {
+    return [];
+  }
+
+  return getMessageAttachments(message)
+    .map(att => att.name || att.filename || "")
+    .filter(name => name && guildState.bannedExtensions.some(ext => name.toLowerCase().endsWith(ext)));
+}
+
+function isDiscordPhishingLink(content) {
+  const normalizedContent = content.toLowerCase();
+  return /[\b\/]d(?!isc)[0-9a-zA-Z]{1,}ord-g[0-9a-zA-Z]{1,}\./g.test(normalizedContent) ||
+    /[\b\/]d(?!isc)[0-9a-zA-Z]{1,4}ord\./g.test(normalizedContent) ||
+    /[\b\/]dis(?!cord)[0-9a-zA-Z]{1,}\.gift\//g.test(normalizedContent) ||
+    /[\b\/]dis(?!cord)[0-9a-zA-Z]{1,}app\.com\//g.test(normalizedContent);
+}
+
+function analyzeScreenshotSpamCandidate(message, content) {
+  const attachments = getMessageAttachments(message);
+  const attachRe = /<?https:\/\/(?:cdn|media)\.discord(?:app)?\.(?:com|net)\/attachments\/\d+\/\d+\/[^\s>]+(?=>|\s|$)>?/g;
+  const markdownLinkRe = /\[([^\]]+)\]\(([^)]+)\)/g;
+  const plainImageUrlRe = /<?https?:\/\/[^\s>]+\.(?:jpg|jpeg|png|gif|webp|bmp)(?:\?[^\s>]*)?>?/gi;
+
+  const discordAttachmentMatches = content.match(attachRe) || [];
+  const markdownMatches = content.match(markdownLinkRe) || [];
+  const plainImageMatchesForCount = content
+    .replace(attachRe, "")
+    .replace(markdownLinkRe, "")
+    .match(plainImageUrlRe) || [];
+  const screenshotCount = discordAttachmentMatches.length + markdownMatches.length + plainImageMatchesForCount.length + attachments.length;
+
+  if (screenshotCount < 2) {
+    return null;
+  }
+
+  const nonScreenshotContent = getVisibleMessageText(
+    content
+      .replace(attachRe, "")
+      .replace(markdownLinkRe, "")
+      .replace(plainImageUrlRe, "")
+  );
+  const pingSignature = getPingSignature(nonScreenshotContent);
+  const plainImageRemainder = getVisibleMessageText(content.replace(plainImageUrlRe, ""));
+  const hasOnlyScreenshots = nonScreenshotContent.length === 0 || plainImageRemainder.length === 0;
+
+  if (!hasOnlyScreenshots && pingSignature === null) {
+    return null;
+  }
+
+  return {
+    offense: "Mass Screenshots spam candidate",
+    action: "Track user; ban only after repeated matching posts across channels",
+    detail: `Found ${screenshotCount} screenshot/image attachment or link(s).`
+  };
+}
+
+function getAttachmentLogValueFromAnyMessage(message) {
+  const attachments = getMessageAttachments(message);
+  if (attachments.length === 0) {
+    return "";
+  }
+
+  return attachments
+    .map(att => {
+      const name = att.name || att.filename || "attachment";
+      return att.url ? `${name}: ${att.url}` : name;
+    })
+    .join("\n")
+    .substring(0, 1024);
+}
+
+async function banForwardedMessageAuthor(adminMessage, source, analysis) {
+  if (!source.originalMessage || !source.guild) {
+    await adminMessage.reply({
+      content: `Could not ban from this forward. I could not fetch the original guild message.${source.error ? `\nError: ${truncateText(source.error, 1200)}` : ""}`,
+      allowedMentions: { parse: [] }
+    });
+    return;
+  }
+
+  const originalMessage = source.originalMessage;
+  const guild = source.guild;
+
+  if (originalMessage.author.id === bot.user.id) {
+    await adminMessage.reply("Refusing to ban the bot's own forwarded message.");
+    return;
+  }
+
+  let deleteSucceeded = false;
+  try {
+    await originalMessage.delete();
+    deleteSucceeded = true;
+  } catch (error) {
+    console.error(`Couldn't delete forwarded source message ${originalMessage.id}:`, error);
+  }
+
+  try {
+    await guild.members.ban(originalMessage.author.id, {
+      deleteMessageSeconds: 43200,
+      reason: `Admin forwarded DM ban requested by ${adminMessage.author.tag || adminMessage.author.id}`
+    });
+
+    logModerationAction({
+      user: originalMessage.author.username,
+      channel: {
+        name: originalMessage.channel.name,
+        id: originalMessage.channel.id
+      },
+      guildId: guild.id,
+      offense: analysis.matches.length > 0
+        ? analysis.matches.map(match => match.offense).join(", ")
+        : "Manual admin ban from forwarded message",
+      action: deleteSucceeded
+        ? "Message Deleted & User Banned"
+        : "User Banned; Message Delete Failed",
+      messageObj: {
+        id: originalMessage.id,
+        content: analysis.content,
+        att: analysis.attachmentText
+      }
+    });
+
+    await adminMessage.reply({
+      content: buildForwardedAnalysisReply(source, analysis, true, deleteSucceeded),
+      allowedMentions: { parse: [] }
+    });
+  } catch (error) {
+    console.error(`Couldn't ban forwarded message author ${originalMessage.author.id}:`, error);
+    await adminMessage.reply({
+      content: `I found the forwarded source, but the ban failed.\nError: ${truncateText(formatError(error), 1200)}`,
+      allowedMentions: { parse: [] }
+    });
+  }
+}
+
+function buildForwardedAnalysisReply(source, analysis, banExecuted, deleteSucceeded) {
+  const originalMessage = source.originalMessage;
+  const guildName = source.guild?.name || source.guildId || "[unknown server]";
+  const channelName = source.channel?.name || originalMessage?.channel?.name || source.channelId || "[unknown channel]";
+  const authorText = originalMessage
+    ? `${originalMessage.author.username} (${originalMessage.author.id})`
+    : "[unavailable from forwarded snapshot]";
+  const ruleLines = analysis.matches.length > 0
+    ? analysis.matches.map(match => `- ${match.offense}: ${match.action}. ${match.detail}`).join("\n")
+    : "- No configured moderation rules matched.";
+  const actionLine = banExecuted
+    ? `\nAction: banned original author and ${deleteSucceeded ? "deleted" : "tried to delete"} the forwarded source message.`
+    : "";
+  const fetchLine = source.error
+    ? `\nSource fetch note: ${truncateText(source.error, 500)}`
+    : "";
+
+  return truncateText([
+    "Forwarded message analysis",
+    `Server: ${guildName}`,
+    `Channel: ${channelName}`,
+    `Author: ${authorText}`,
+    "Rule evaluation:",
+    ruleLines,
+    actionLine,
+    fetchLine
+  ].filter(Boolean).join("\n"), 1900);
+}
+
 function getVisibleMessageText(content) {
   return content
     .replace(/\|\|/g, "")
@@ -742,16 +1194,18 @@ function buildAdminFallbackMessage(actionObj, reason, error) {
 }
 
 function dmAdminModerationLogFailure(actionObj, reason, error) {
-  if (!adminUserID) {
-    console.log("No adminUserID set in config.json - cannot DM moderation log failure.");
+  if (adminUserIDs.length === 0) {
+    console.log("No adminUserID/adminUserIDs set in config.json - cannot DM moderation log failure.");
     return;
   }
 
-  bot.users.fetch(adminUserID)
-    .then(adminUser => adminUser.send(buildAdminFallbackMessage(actionObj, reason, error)))
-    .catch(dmError => {
-      console.error(`Couldn't DM admin user ${adminUserID} about moderation log failure:`, dmError);
-    });
+  adminUserIDs.forEach(adminId => {
+    bot.users.fetch(adminId)
+      .then(adminUser => adminUser.send(buildAdminFallbackMessage(actionObj, reason, error)))
+      .catch(dmError => {
+        console.error(`Couldn't DM admin user ${adminId} about moderation log failure:`, dmError);
+      });
+  });
 }
 
 // Check for banned file attachments

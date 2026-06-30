@@ -1,4 +1,5 @@
 {
   "discord-token": "abcd.1234",
-  "adminUserID": "123456789012345678"
+  "adminUserID": "123456789012345678",
+  "adminUserIDs": ["123456789012345678"]
 }
