@@ -6,6 +6,7 @@ A streamlined Discord bot focused on automated spam protection and moderation lo
 
 ### Spam Protection
 - **Mass Screenshot Detection**: Bans users posting 3+ attachment links across different channels
+- **Known Screenshot Detection**: Can ban a member who joined within 30 days when an attachment-only/image-link-only post closely matches an image in `images-to-detect` and the bot has not recently seen normal text activity from that member
 - **@everyone/@here Abuse**: Warns first, then bans on repeat offenses
 - **Mass Mentions**: Auto-bans users with few roles mentioning 6+ users
 - **Nitro Scams**: Detects and bans "free nitro" phishing attempts
@@ -150,13 +151,14 @@ const autoBan = false; // Default: true
 ## Spam Patterns Detected
 
 1. **Mass Screenshots**: 3+ image/attachment links with no text, or 2+ screenshots with only identical pings across tracked messages
-2. **Everyone/Here Pings**: Users without permission trying to ping everyone
-3. **Mass User Mentions**: 6+ user mentions from users with <2 roles
-4. **Nitro Scams**: "nitro for free" or "free discord nitro"
-5. **Discord Phishing**: Typosquatted Discord domains (e.g., `discørd.gift`)
-6. **Arabic Spam Character**: Specific Unicode character used by spam bots
-7. **Adult Content**: Known adult dating spam patterns
-8. **Gambling Spam**: Casino spam patterns
+2. **Known Screenshot**: Attachment/image-link-only spam shape plus a perceptual grayscale match to `images-to-detect`, gated by a join date within 30 days and no normal text activity observed in the last 30 days; roles are deliberately ignored because bots can obtain self-assigned roles
+3. **Everyone/Here Pings**: Users without permission trying to ping everyone
+4. **Mass User Mentions**: 6+ user mentions from users with <2 roles
+5. **Nitro Scams**: "nitro for free" or "free discord nitro"
+6. **Discord Phishing**: Typosquatted Discord domains (e.g., `discørd.gift`)
+7. **Arabic Spam Character**: Specific Unicode character used by spam bots
+8. **Adult Content**: Known adult dating spam patterns
+9. **Gambling Spam**: Casino spam patterns
 
 ## Permissions Required
 

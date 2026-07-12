@@ -55,3 +55,7 @@ config.json
 
 # state file
 state.json
+
+# Local known-spam image corpus (keep the directory, never commit its contents)
+images-to-detect/*
+!images-to-detect/.gitkeep

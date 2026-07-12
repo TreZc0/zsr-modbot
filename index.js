@@ -1,6 +1,8 @@
 const Discord = require('discord.js');
 const jsonfile = require('jsonfile');
 const fs = require('fs');
+const path = require('path');
+const { findClosestReference, loadReferenceImages } = require('./image-detector');
 
 // Configuration
 const configFile = './config.json';
@@ -36,6 +38,24 @@ const bot = new Discord.Client({
 // Spam tracking
 let botSpamCheck = [];
 let botSpamScreenShotCheckObj = {};
+const recentTextActivity = new Map();
+
+// A reference match alone is never enough to ban. These conservative activity
+// signals must both be present as well. Role count is intentionally ignored:
+// modern spam bots can obtain self-assigned/onboarding roles.
+const IMAGE_MATCH_MAX_DISTANCE = 20; // 20/256 differing grayscale hash bits (7.8%).
+const RECENT_JOIN_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+const RECENT_TEXT_HISTORY_MS = 7 * 24 * 60 * 60 * 1000;
+const MAX_IMAGE_DOWNLOAD_BYTES = 12 * 1024 * 1024;
+const referenceImagesReady = loadReferenceImages(path.join(__dirname, 'images-to-detect'))
+  .then(references => {
+    console.log(`Indexed ${references.length} reference image(s) for single-image spam detection.`);
+    return references;
+  })
+  .catch(error => {
+    console.error('Could not index reference images; single-image detection is disabled:', error);
+    return [];
+  });
 
 // Constants
 const autoBan = true;
@@ -343,6 +363,26 @@ bot.on('messageCreate', async message => {
   );
   const pingSignature = getPingSignature(nonScreenshotContent);
   const isScreenshotsWithOnlyPings = screenshotCount >= 2 && pingSignature !== null;
+
+  // The known-image check is a second stage of the same attachment-only spam
+  // shape. A normal message containing an image is never image-compared.
+  const isAttachmentOnlyImagePost = screenshotCount >= 1 && nonScreenshotContent.length === 0;
+  const imageCandidateUrls = getImageCandidateUrls(
+    message,
+    matches,
+    markdownMatches,
+    plainImageMatchesForCount
+  );
+  const hadRecentText = hasRecentTextActivity(message, Date.now());
+
+  if (!message.author.bot && message.member && isAttachmentOnlyImagePost && imageCandidateUrls.length > 0) {
+    const handledKnownImage = await checkKnownImageSpam(message, imageCandidateUrls, hadRecentText);
+    if (handledKnownImage) return;
+  }
+
+  if (nonScreenshotContent.length > 0 && pingSignature === null) {
+    recentTextActivity.set(getTextActivityKey(message), Date.now());
+  }
 
   const isScreenshotSpam = isOnlyAttachmentsTwoPlus || isOnlyMarkdownLinksTwo || isOnlyFileAttachmentsTwoPlus || isOnlyPlainImageUrls;
 
@@ -653,6 +693,130 @@ bot.on('messageCreate', async message => {
       .catch(error => console.log("Couldn't ban bot (online casino links) because of the following error: \n" + error));
   }
 });
+
+function isImageAttachment(attachment) {
+  if (attachment.contentType && attachment.contentType.toLowerCase().startsWith('image/')) {
+    return true;
+  }
+  return /\.(?:jpe?g|png|webp|gif|bmp)$/i.test(attachment.name || '');
+}
+
+function getTextActivityKey(message) {
+  return `${message.guild.id}:${message.author.id}`;
+}
+
+function hasRecentTextActivity(message, now) {
+  const lastSeenAt = recentTextActivity.get(getTextActivityKey(message));
+  return typeof lastSeenAt === 'number' && now - lastSeenAt <= RECENT_TEXT_HISTORY_MS;
+}
+
+function stripLinkFormatting(value) {
+  const markdownMatch = /^\[[^\]]+\]\(([^)]+)\)$/.exec(value);
+  return (markdownMatch ? markdownMatch[1] : value).replace(/^<|>$/g, '');
+}
+
+function getImageCandidateUrls(message, discordLinks, markdownLinks, plainImageLinks) {
+  const urls = new Set();
+
+  Array.from(message.attachments.values())
+    .filter(isImageAttachment)
+    .forEach(attachment => urls.add(attachment.url));
+  [...discordLinks, ...markdownLinks, ...plainImageLinks]
+    .map(stripLinkFormatting)
+    .filter(url => /^https?:\/\//i.test(url))
+    .forEach(url => urls.add(url));
+
+  return Array.from(urls);
+}
+
+async function downloadImage(url) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8000);
+
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+    const declaredLength = Number(response.headers.get('content-length'));
+    if (Number.isFinite(declaredLength) && declaredLength > MAX_IMAGE_DOWNLOAD_BYTES) {
+      throw new Error(`image exceeds ${MAX_IMAGE_DOWNLOAD_BYTES} bytes`);
+    }
+
+    const chunks = [];
+    let byteLength = 0;
+    for await (const chunk of response.body) {
+      byteLength += chunk.length;
+      if (byteLength > MAX_IMAGE_DOWNLOAD_BYTES) {
+        throw new Error(`image exceeds ${MAX_IMAGE_DOWNLOAD_BYTES} bytes`);
+      }
+      chunks.push(chunk);
+    }
+    return Buffer.concat(chunks, byteLength);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function checkKnownImageSpam(message, imageUrls, hadRecentText) {
+  const now = Date.now();
+  const references = await referenceImagesReady;
+  if (references.length === 0) return false;
+
+  let closest = null;
+  for (const imageUrl of imageUrls.slice(0, 4)) {
+    try {
+      const image = await downloadImage(imageUrl);
+      const candidate = await findClosestReference(image, references);
+      if (candidate && (!closest || candidate.distance < closest.distance)) {
+        closest = candidate;
+      }
+    } catch (error) {
+      console.error(`Could not compare image candidate ${imageUrl}:`, error);
+    }
+  }
+
+  if (!closest || closest.distance > IMAGE_MATCH_MAX_DISTANCE) return false;
+
+  const joinedTimestamp = message.member.joinedTimestamp;
+  const recentlyJoined = typeof joinedTimestamp === 'number' &&
+    now - joinedTimestamp >= 0 &&
+    now - joinedTimestamp <= RECENT_JOIN_MAX_AGE_MS;
+  if (!recentlyJoined || hadRecentText) {
+    console.log(
+      `Known image matched ${message.author.username} (${closest.name}, distance ${closest.distance}), ` +
+      `but risk checks did not permit a ban: recentJoin=${recentlyJoined}, ` +
+      `recentText=${hadRecentText}`
+    );
+    return false;
+  }
+
+  message.delete().catch(() => {});
+  const moderationLog = {
+    user: message.author.username,
+    channel: { name: message.channel.name, id: message.channel.id },
+    guildId: message.guild.id,
+    offense: `Known spam image (${closest.name}, ${Math.round(closest.similarity * 100)}% hash similarity) in an attachment-only post from a recent member with no recent text activity`,
+    action: 'Message Deleted & User Banned',
+    messageObj: {
+      id: message.id,
+      content: message.content,
+      att: getAttachmentLogValue(message)
+    }
+  };
+
+  try {
+    await message.member.ban({
+      deleteMessageSeconds: 43200,
+      reason: `Known spam image matched ${closest.name}; recent member with no recent text activity`
+    });
+    console.log(`Known-image spam bot banned: ${message.author.username} (${closest.name}, distance ${closest.distance})`);
+    logModerationAction(moderationLog);
+  } catch (error) {
+    console.error(`Could not ban known-image spam match ${message.author.username}:`, error);
+    logModerationAction({ ...moderationLog, action: 'Message Deleted & Ban Failed' });
+  }
+  return true;
+}
 
 function isConfiguredAdmin(userId) {
   return Boolean(adminUserID) && String(userId) === String(adminUserID);
