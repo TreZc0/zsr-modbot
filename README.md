@@ -33,9 +33,7 @@ A streamlined Discord bot focused on automated spam protection and moderation lo
 
 ### Required Bot Intents
 Enable these in the Discord Developer Portal:
-- Server Members Intent
 - Message Content Intent
-- Presence Intent (optional)
 
 The bot also requests the Direct Messages gateway intent in code so configured admins can forward messages to it in DMs.
 

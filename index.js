@@ -24,7 +24,6 @@ if (!fs.existsSync(stateFile)) {
 // Discord Bot Setup
 const botIntents = [
   Discord.GatewayIntentBits.Guilds,
-  Discord.GatewayIntentBits.GuildMembers,
   Discord.GatewayIntentBits.GuildMessages,
   Discord.GatewayIntentBits.DirectMessages,
   Discord.GatewayIntentBits.MessageContent
