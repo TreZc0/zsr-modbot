@@ -3,6 +3,7 @@ const jsonfile = require('jsonfile');
 const fs = require('fs');
 const path = require('path');
 const { findClosestReference, loadReferenceImages } = require('./image-detector');
+const { scheduleScreenshotSpamCleanup } = require('./screenshot-cleanup');
 
 // Configuration
 const configFile = './config.json';
@@ -38,6 +39,7 @@ const bot = new Discord.Client({
 let botSpamCheck = [];
 let botSpamScreenShotCheckObj = {};
 const recentTextActivity = new Map();
+const massPingWarnings = new Set();
 
 // A reference match alone is never enough to ban. These conservative activity
 // signals must both be present as well. Role count is intentionally ignored:
@@ -386,42 +388,45 @@ bot.on('messageCreate', async message => {
   const isScreenshotSpam = isOnlyAttachmentsTwoPlus || isOnlyMarkdownLinksTwo || isOnlyFileAttachmentsTwoPlus || isOnlyPlainImageUrls;
 
   if (isScreenshotSpam || isScreenshotsWithOnlyPings) {
-      const uid = message.author.id;
+      const trackingKey = `${message.guild.id}:${message.author.id}`;
 
       // Initialize tracking object if not exists
-      if (!(uid in botSpamScreenShotCheckObj)) {
-          botSpamScreenShotCheckObj[uid] = {
+      if (!(trackingKey in botSpamScreenShotCheckObj)) {
+          botSpamScreenShotCheckObj[trackingKey] = {
               count: 0,
               channels: new Set(),
               screenshotSpamChannels: new Set(),
               pingScreenshotChannels: new Set(),
-              pingSignatures: []
+              pingSignatures: [],
+              messageIds: new Map()
           };
           setTimeout(() => {
-              if (uid in botSpamScreenShotCheckObj)
-                  delete botSpamScreenShotCheckObj[uid];
+              if (trackingKey in botSpamScreenShotCheckObj)
+                  delete botSpamScreenShotCheckObj[trackingKey];
           }, 180000);
       }
 
+      botSpamScreenShotCheckObj[trackingKey].messageIds.set(message.id, message.channel.id);
+
       // Only count if this is a new channel
-      if (!botSpamScreenShotCheckObj[uid].channels.has(message.channel.id)) {
-          botSpamScreenShotCheckObj[uid].channels.add(message.channel.id);
-          botSpamScreenShotCheckObj[uid].count++;
+      if (!botSpamScreenShotCheckObj[trackingKey].channels.has(message.channel.id)) {
+          botSpamScreenShotCheckObj[trackingKey].channels.add(message.channel.id);
+          botSpamScreenShotCheckObj[trackingKey].count++;
       }
 
       if (isScreenshotSpam) {
-          botSpamScreenShotCheckObj[uid].screenshotSpamChannels.add(message.channel.id);
+          botSpamScreenShotCheckObj[trackingKey].screenshotSpamChannels.add(message.channel.id);
       }
 
-      if (isScreenshotsWithOnlyPings && !botSpamScreenShotCheckObj[uid].pingScreenshotChannels.has(message.channel.id)) {
-          botSpamScreenShotCheckObj[uid].pingScreenshotChannels.add(message.channel.id);
-          botSpamScreenShotCheckObj[uid].pingSignatures.push(pingSignature);
+      if (isScreenshotsWithOnlyPings && !botSpamScreenShotCheckObj[trackingKey].pingScreenshotChannels.has(message.channel.id)) {
+          botSpamScreenShotCheckObj[trackingKey].pingScreenshotChannels.add(message.channel.id);
+          botSpamScreenShotCheckObj[trackingKey].pingSignatures.push(pingSignature);
       }
 
-      const trackedPingSignatures = botSpamScreenShotCheckObj[uid].pingSignatures;
-      const hasIdenticalPingScreenshots = botSpamScreenShotCheckObj[uid].pingScreenshotChannels.size >= 2 &&
+      const trackedPingSignatures = botSpamScreenShotCheckObj[trackingKey].pingSignatures;
+      const hasIdenticalPingScreenshots = botSpamScreenShotCheckObj[trackingKey].pingScreenshotChannels.size >= 2 &&
           trackedPingSignatures.every(signature => signature !== null && signature === trackedPingSignatures[0]);
-      const hasScreenshotSpamInMultipleChannels = botSpamScreenShotCheckObj[uid].screenshotSpamChannels.size >= 2;
+      const hasScreenshotSpamInMultipleChannels = botSpamScreenShotCheckObj[trackingKey].screenshotSpamChannels.size >= 2;
 
       // Ban if spam detected in 2+ different channels
       if (hasScreenshotSpamInMultipleChannels || hasIdenticalPingScreenshots) {
@@ -451,16 +456,22 @@ bot.on('messageCreate', async message => {
                       offense: "Mass Screenshots spam - member fetch failed",
                       action: "Message Deleted & Ban Failed"
                   });
-                  delete botSpamScreenShotCheckObj[uid];
+                  delete botSpamScreenShotCheckObj[trackingKey];
                   return;
               }
           }
+
+          const recordedMessages = Array.from(
+              botSpamScreenShotCheckObj[trackingKey].messageIds,
+              ([messageId, channelId]) => ({ messageId, channelId })
+          );
 
           try {
               await member.ban({
                   deleteMessageSeconds: 43200,
                   reason: "Spam Bot with mass screenshots, auto banned!"
               });
+              scheduleScreenshotSpamCleanup(message.guild, recordedMessages);
               console.log(`Spam Bot with mass screenshots banned! Username: ${message.author.username}`);
               logModerationAction(moderationLog);
           } catch (error) {
@@ -470,7 +481,7 @@ bot.on('messageCreate', async message => {
                   action: "Message Deleted & Ban Failed"
               });
           } finally {
-              delete botSpamScreenShotCheckObj[uid];
+              delete botSpamScreenShotCheckObj[trackingKey];
           }
       }
   }
@@ -539,25 +550,53 @@ bot.on('messageCreate', async message => {
     }
   }
 
-  // Mass ping detection (users with few roles)
+  // Mass ping detection (users with few roles). As with @everyone/@here,
+  // warn on the first offense and only ban a repeat attempt within the window.
   if (autoBan && message.member && message.member.roles.cache.size < 2 && message.mentions.members.size > 6) {
-    console.log("Banning user for mass pings", message.content, message.member.displayName);
-    message.member.ban({
-      deleteMessageSeconds: 43200,
-      reason: "Spam Bot with mass pings, auto banned!"
-    })
-      .then(() => {
-        console.log("Spam Bot with mass pings banned! Username: " + message.member.displayName);
-        logModerationAction({
-          user: message.author.username,
-          channel: { name: message.channel.name, id: message.channel.id },
-          guildId: message.guild.id,
-          offense: "Mass Ping from user without roles",
-          action: "Message Deleted & User Banned",
-          messageObj: { id: message.id, content: message.content }
-        });
+    const warningKey = `${message.guild.id}:${message.author.id}`;
+
+    if (massPingWarnings.has(warningKey)) {
+      console.log("Banning user for repeated mass pings", message.content, message.member.displayName);
+      message.delete();
+      message.member.ban({
+        deleteMessageSeconds: 43200,
+        reason: "Repeated mass pings after warning, auto banned!"
       })
-      .catch(error => console.log("Couldn't ban bot (mass pings) because of the following error: \n" + error));
+        .then(() => {
+          console.log("Spam Bot with mass pings banned! Username: " + message.member.displayName);
+          logModerationAction({
+            user: message.author.username,
+            channel: { name: message.channel.name, id: message.channel.id },
+            guildId: message.guild.id,
+            offense: "Repeated Mass Ping from user without roles",
+            action: "Message Deleted & User Banned",
+            messageObj: { id: message.id, content: message.content }
+          });
+        })
+        .catch(error => console.log("Couldn't ban bot (mass pings) because of the following error: \n" + error));
+    } else {
+      massPingWarnings.add(warningKey);
+      message.reply("Hey there. You have tried to mass ping users in this server. Repeated attempts to mass ping will be met with a ban.")
+        .then(disclaimer => {
+          message.delete();
+          setTimeout(() => {
+            disclaimer.delete();
+          }, 15000);
+        });
+
+      logModerationAction({
+        user: message.author.username,
+        channel: { name: message.channel.name, id: message.channel.id },
+        guildId: message.guild.id,
+        offense: "Mass Ping from user without roles",
+        action: "Message Deleted & Warning issued",
+        messageObj: { id: message.id, content: message.content }
+      });
+
+      setTimeout(() => {
+        massPingWarnings.delete(warningKey);
+      }, 45000);
+    }
   }
 
   // Nitro scam detection
@@ -949,15 +988,18 @@ function analyzeMessageAgainstRules(message, guild, member) {
   }
 
   if (autoBan && lowRoleUser === true && mentionCount > 6) {
+    const warningKey = guild && message?.author?.id ? `${guild.id}:${message.author.id}` : null;
     matches.push({
       offense: "Mass Ping from user without roles",
-      action: "User ban",
+      action: warningKey && massPingWarnings.has(warningKey)
+        ? "Message deletion and user ban"
+        : "Message deletion and warning",
       detail: `Mentioned ${mentionCount} users with ${roleCount} cached role(s).`
     });
   } else if (autoBan && lowRoleUser === null && mentionCount > 6) {
     matches.push({
       offense: "Mass Ping",
-      action: "Needs original member roles to decide ban",
+      action: "Needs original member roles to decide warning/ban",
       detail: `Mentioned ${mentionCount} users.`
     });
   }
