@@ -753,15 +753,30 @@ function stripLinkFormatting(value) {
   return (markdownMatch ? markdownMatch[1] : value).replace(/^<|>$/g, '');
 }
 
+function isImageUrl(value) {
+  try {
+    const url = new URL(value);
+    return /\.(?:jpe?g|png|webp|gif|bmp)$/i.test(url.pathname);
+  } catch {
+    return false;
+  }
+}
+
 function getImageCandidateUrls(message, discordLinks, markdownLinks, plainImageLinks) {
   const urls = new Set();
 
   Array.from(message.attachments.values())
     .filter(isImageAttachment)
     .forEach(attachment => urls.add(attachment.url));
-  [...discordLinks, ...markdownLinks, ...plainImageLinks]
+
+  [...discordLinks, ...plainImageLinks]
     .map(stripLinkFormatting)
     .filter(url => /^https?:\/\//i.test(url))
+    .forEach(url => urls.add(url));
+
+  markdownLinks
+    .map(stripLinkFormatting)
+    .filter(url => /^https?:\/\//i.test(url) && isImageUrl(url))
     .forEach(url => urls.add(url));
 
   return Array.from(urls);
@@ -774,6 +789,11 @@ async function downloadImage(url) {
   try {
     const response = await fetch(url, { signal: controller.signal });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+    const contentType = response.headers.get('content-type');
+    if (contentType && !contentType.toLowerCase().startsWith('image/')) {
+      throw new Error(`expected an image response, received ${contentType}`);
+    }
 
     const declaredLength = Number(response.headers.get('content-length'));
     if (Number.isFinite(declaredLength) && declaredLength > MAX_IMAGE_DOWNLOAD_BYTES) {
