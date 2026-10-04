@@ -551,8 +551,9 @@ bot.on('messageCreate', async message => {
   }
 
   // Mass ping detection (users with few roles). As with @everyone/@here,
-  // warn on the first offense and only ban a repeat attempt within the window.
-  if (autoBan && message.member && message.member.roles.cache.size < 2 && message.mentions.members.size > 6) {
+  // warn on the first offense and only ban a repeat attempt within the window
+  // Limit to very short messages which are likely spam.
+  if (autoBan && message.member && message.member.roles.cache.size < 2 && message.mentions.members.size > 30 && message.content.length < 150) {
     const warningKey = `${message.guild.id}:${message.author.id}`;
 
     if (massPingWarnings.has(warningKey)) {
